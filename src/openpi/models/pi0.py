@@ -9,6 +9,7 @@ from typing_extensions import override
 
 from openpi.models import model as _model
 from openpi.models import pi0_config
+from openpi.models import tactile_encoder as _tactile
 import openpi.models.gemma as _gemma
 import openpi.models.siglip as _siglip
 from openpi.shared import array_typing as at
@@ -67,6 +68,7 @@ class Pi0(_model.BaseModel):
     def __init__(self, config: pi0_config.Pi0Config, rngs: nnx.Rngs):
         super().__init__(config.action_dim, config.action_horizon, config.max_token_len)
         self.pi05 = config.pi05
+        self.use_tactile = config.pi05 and config.use_tactile
         paligemma_config = _gemma.get_config(config.paligemma_variant)
         action_expert_config = _gemma.get_config(config.action_expert_variant)
         # TODO: rewrite gemma in NNX. For now, use bridge.
@@ -98,6 +100,18 @@ class Pi0(_model.BaseModel):
             self.action_time_mlp_in = nnx.Linear(2 * action_expert_config.width, action_expert_config.width, rngs=rngs)
             self.action_time_mlp_out = nnx.Linear(action_expert_config.width, action_expert_config.width, rngs=rngs)
         self.action_out_proj = nnx.Linear(action_expert_config.width, config.action_dim, rngs=rngs)
+        if self.use_tactile:
+            tactile_cfg = _tactile.DualFSRMLPConfig(
+                T=config.tactile_T,
+                H=config.tactile_H,
+                W=config.tactile_W,
+                use_delta=config.tactile_use_delta,
+                hidden=config.tactile_hidden,
+                emb_dim=config.tactile_emb_dim,
+                width=paligemma_config.width,
+                dropout=config.tactile_dropout,
+            )
+            self.tactile_encoder = _tactile.DualFSRToTwoTokens(tactile_cfg)
 
         # This attribute gets automatically set by model.train() and model.eval().
         self.deterministic = True
@@ -131,6 +145,18 @@ class Pi0(_model.BaseModel):
             input_mask.append(obs.tokenized_prompt_mask)
             # full attention between image and language inputs
             ar_mask += [False] * tokenized_inputs.shape[1]
+
+        if self.use_tactile:
+            if obs.tactile_left is None or obs.tactile_right is None:
+                raise ValueError("tactile_left and tactile_right are required when use_tactile=True.")
+            tok_left, tok_right = self.tactile_encoder(
+                obs.tactile_left, obs.tactile_right, train=not self.deterministic
+            )
+            tokens.append(tok_left)
+            tokens.append(tok_right)
+            input_mask.append(jnp.ones((obs.state.shape[0], 1), dtype=jnp.bool_))
+            input_mask.append(jnp.ones((obs.state.shape[0], 1), dtype=jnp.bool_))
+            ar_mask += [False, False]
         tokens = jnp.concatenate(tokens, axis=1)
         input_mask = jnp.concatenate(input_mask, axis=1)
         ar_mask = jnp.array(ar_mask)

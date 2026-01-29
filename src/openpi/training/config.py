@@ -354,6 +354,52 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
             model_transforms=model_transforms,
         )
 
+@dataclasses.dataclass(frozen=True)
+class LeRobotUF850DataConfig(DataConfigFactory):
+    
+    extra_delta_transform: bool = True
+    
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        repack_transform = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        # 根据你的 modality.json 原始键名映射
+                        "observation/image": "observation.images.front",
+                        "observation/wrist_image": "observation.images.wrist",
+                        "observation/state": "observation.state",
+                        "actions": "action",
+                        # 如果开启了 prompt_from_task，dataloader 会自动处理 prompt
+                        "prompt": "prompt", 
+                    }
+                )
+            ]
+        )
+
+        data_transforms = _transforms.Group(
+            inputs=[libero_policy.LiberoInputs(model_type=model_config.model_type)],
+            outputs=[libero_policy.LiberoOutputs()],
+        )
+
+        if self.extra_delta_transform:
+            delta_action_mask = _transforms.make_bool_mask(6, -1)
+            data_transforms = data_transforms.push(
+                inputs=[_transforms.DeltaActions(delta_action_mask)],
+                outputs=[_transforms.AbsoluteActions(delta_action_mask)],
+            )
+
+        model_transforms = ModelTransformFactory()(model_config)
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+            action_sequence_keys=("action",),
+            prompt_from_task=True,
+        )
+
 
 @dataclasses.dataclass(frozen=True)
 class RLDSDroidDataConfig(DataConfigFactory):
@@ -761,6 +807,78 @@ _CONFIGS = [
         pytorch_weight_path="/path/to/your/pytorch_weight_path",
         num_train_steps=30_000,
     ),
+
+    TrainConfig(
+        name="uf850_pi05_finetune",
+        # 启用 pi0.5 架构
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=15, discrete_state_input=False),
+        data=LeRobotUF850DataConfig(
+            # 替换为你解压后的数据集绝对路径
+            repo_id="/home/lc/openpi-main/uf850_teleop_datasetV1",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=True,
+        ),
+        # 学习率与优化器设置（参考 pi05_libero 标准参数）
+        batch_size=8,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=500,
+            peak_lr=5e-5,
+            decay_steps=20_000,
+            decay_lr=1e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.995,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        pytorch_weight_path="/home/lc/openpi-main/pi0.5_pytorch",
+        num_train_steps=30_000,
+    ),
+
+    TrainConfig(
+        name="uf850_pi05_finetune_lora",
+        # 启用 pi0.5 架构并配置 LoRA 变体
+        model=pi0_config.Pi0Config(
+            pi05=True, 
+            action_horizon=15, 
+            discrete_state_input=False,
+            # 指定使用 LoRA 变体
+            paligemma_variant="gemma_2b_lora",  # 视觉语言模型部分使用 LoRA
+            action_expert_variant="gemma_300m_lora",  # 动作解码器部分使用 LoRA
+        ),
+        data=LeRobotUF850DataConfig(
+            repo_id="/home/lc/openpi-main/uf850_teleop_datasetV1",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=True,
+        ),
+        # 冻结非 LoRA 参数：这是开启 LoRA 微调的关键
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=15,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
+    
+        # 学习率与优化器设置
+        batch_size=8,
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=500,
+            peak_lr=1e-4,
+            decay_steps=20_000,
+            decay_lr=1e-6,
+        ),
+        # 关闭 EMA：LoRA 模式下通常将其设为 None
+        ema_decay=None,
+    
+        # 权重路径保持不变
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        pytorch_weight_path="/home/lc/openpi-main/pi0.5_pytorch",
+        num_train_steps=20_000,
+    
+        # 保存设置（可选，建议根据实验增加频率）
+        save_interval=500,
+        keep_period=500,
+    ),
+
     #
     # Fine-tuning Aloha configs.
     #

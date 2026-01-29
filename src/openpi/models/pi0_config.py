@@ -32,6 +32,16 @@ class Pi0Config(_model.BaseModelConfig):
     # This config option is not used directly by the model, but it is read by the ModelTransformFactory.
     discrete_state_input: bool = None  # type: ignore
 
+    # Optional tactile inputs (PI05 only).
+    use_tactile: bool = False
+    tactile_T: int = 5
+    tactile_H: int = 16
+    tactile_W: int = 16
+    tactile_use_delta: bool = True
+    tactile_hidden: int = 1024
+    tactile_emb_dim: int = 512
+    tactile_dropout: float = 0.10
+
     def __post_init__(self):
         if self.max_token_len is None:
             object.__setattr__(self, "max_token_len", 200 if self.pi05 else 48)
@@ -71,6 +81,16 @@ class Pi0Config(_model.BaseModelConfig):
                 state=jax.ShapeDtypeStruct([batch_size, self.action_dim], jnp.float32),
                 tokenized_prompt=jax.ShapeDtypeStruct([batch_size, self.max_token_len], jnp.int32),
                 tokenized_prompt_mask=jax.ShapeDtypeStruct([batch_size, self.max_token_len], bool),
+                tactile_left=(
+                    jax.ShapeDtypeStruct([batch_size, self.tactile_T, self.tactile_H, self.tactile_W], jnp.float32)
+                    if self.use_tactile
+                    else None
+                ),
+                tactile_right=(
+                    jax.ShapeDtypeStruct([batch_size, self.tactile_T, self.tactile_H, self.tactile_W], jnp.float32)
+                    if self.use_tactile
+                    else None
+                ),
             )
         action_spec = jax.ShapeDtypeStruct([batch_size, self.action_horizon, self.action_dim], jnp.float32)
 
