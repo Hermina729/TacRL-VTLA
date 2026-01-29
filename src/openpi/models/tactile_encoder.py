@@ -34,20 +34,20 @@ class SharedFSRMLPEncoder(nn.Module):
     def __call__(self, fsr_window: jnp.ndarray, *, train: bool) -> jnp.ndarray:
         """
         Args:
-            fsr_window: (B, T, H, W)
+            fsr_window: (..., T, H, W)
         Returns:
-            (B, emb_dim)
+            (..., emb_dim)
         """
         x = fsr_window.astype(jnp.float32)
 
         if self.cfg.use_delta:
-            if x.shape[1] < 2:
+            if x.shape[-3] < 2:
                 raise ValueError("FSR window must have T>=2 when use_delta=True.")
-            delta = (x[:, -1] - x[:, -2])[:, None, :, :]
-            x = jnp.concatenate([x, delta], axis=1)
+            delta = (x[..., -1, :, :] - x[..., -2, :, :])[..., None, :, :]
+            x = jnp.concatenate([x, delta], axis=-3)
 
-        b = x.shape[0]
-        x = x.reshape((b, -1))
+        batch_shape = x.shape[:-3]
+        x = x.reshape((*batch_shape, -1))
 
         x = nn.Dense(self.cfg.hidden)(x)
         x = nn.gelu(x)

@@ -88,7 +88,7 @@ class Observation(Generic[ArrayT]):
     See `Observation.from_dict` to see the expected dictionary form. This is the format
     that should be produced by the data transforms.
     """
-
+    #ArrayT 是数据类型占位，支持三种类型数据的联合
     # Images, in [-1, 1] float32.
     images: dict[str, at.Float[ArrayT, "*b h w c"]]
     # Image masks, with same keys as images.
@@ -109,6 +109,10 @@ class Observation(Generic[ArrayT]):
     token_loss_mask: at.Bool[ArrayT, "*b l"] | None = None
 
     # Optional tactile inputs (PI05 tactile).
+    #建议数据类型：
+    #tactile_left = jnp.asarray(tactile_left, dtype=jnp.float32)
+    #tactile_right = jnp.asarray(tactile_right, dtype=jnp.float32)
+
     tactile_left: at.Float[ArrayT, "*b t h w"] | None = None
     tactile_right: at.Float[ArrayT, "*b t h w"] | None = None
 

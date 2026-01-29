@@ -325,6 +325,40 @@ class PromptFromLeRobotTask(DataTransformFn):
 
 
 @dataclasses.dataclass(frozen=True)
+class TactilePreprocess(DataTransformFn):
+    """Applies tactile preprocessing: per-sample baseline subtraction + log1p."""
+
+    # If true, apply log1p after baseline subtraction.
+    use_log1p: bool = True
+    # Clip values below this before log1p to avoid NaNs.
+    clip_min: float = 0.0
+
+    def _process(self, x: np.ndarray) -> np.ndarray:
+        x = np.asarray(x, dtype=np.float32)
+        # Expect (T, H, W) for unbatched samples.
+        if x.ndim < 3:
+            raise ValueError(f"Expected tactile shape (T,H,W), got {x.shape}")
+        baseline = x[:1]
+        x = x - baseline
+        if self.use_log1p:
+            if self.clip_min is not None:
+                x = np.maximum(x, self.clip_min)
+            x = np.log1p(x)
+        return x
+
+    def __call__(self, data: DataDict) -> DataDict:
+        for key in (
+            "tactile_left",
+            "tactile_right",
+            "observation/tactile_left",
+            "observation/tactile_right",
+        ):
+            if key in data:
+                data[key] = self._process(data[key])
+        return data
+
+
+@dataclasses.dataclass(frozen=True)
 class PadStatesAndActions(DataTransformFn):
     """Zero-pads states and actions to the model action dimension."""
 

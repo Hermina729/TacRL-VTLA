@@ -20,6 +20,8 @@ import openpi.models.tokenizer as _tokenizer
 import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.droid_policy as droid_policy
 import openpi.policies.libero_policy as libero_policy
+import openpi.policies.uf850_policy as uf850_policy
+import openpi.shared.nnx_utils as nnx_utils
 import openpi.shared.download as _download
 import openpi.shared.normalize as _normalize
 import openpi.training.droid_rlds_dataset as droid_rlds_dataset
@@ -369,6 +371,8 @@ class LeRobotUF850DataConfig(DataConfigFactory):
                         "observation/image": "observation.images.front",
                         "observation/wrist_image": "observation.images.wrist",
                         "observation/state": "observation.state",
+                        "observation/tactile_left": "observation.tactile_left",
+                        "observation/tactile_right": "observation.tactile_right",
                         "actions": "action",
                         # 如果开启了 prompt_from_task，dataloader 会自动处理 prompt
                         "prompt": "prompt", 
@@ -378,8 +382,11 @@ class LeRobotUF850DataConfig(DataConfigFactory):
         )
 
         data_transforms = _transforms.Group(
-            inputs=[libero_policy.LiberoInputs(model_type=model_config.model_type)],
-            outputs=[libero_policy.LiberoOutputs()],
+            inputs=[
+                _transforms.TactilePreprocess(),
+                uf850_policy.UF850Inputs(model_type=model_config.model_type),
+            ],
+            outputs=[uf850_policy.UF850Outputs()],
         )
 
         if self.extra_delta_transform:
@@ -875,6 +882,44 @@ _CONFIGS = [
         num_train_steps=20_000,
     
         # 保存设置（可选，建议根据实验增加频率）
+        save_interval=500,
+        keep_period=500,
+    ),
+
+    TrainConfig(
+        name="uf850_pi05_lora_tactile",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=15,
+            discrete_state_input=False,
+            use_tactile=True,
+            tactile_T=5,
+            tactile_H=16,
+            tactile_W=16,
+            tactile_use_delta=True,
+            tactile_hidden=1024,
+            tactile_emb_dim=512,
+            tactile_dropout=0.10,
+        ),
+        data=LeRobotUF850DataConfig(
+            repo_id="/home/lc/openpi-main/uf850_teleop_datasetV1",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=True,
+        ),
+        # Freeze everything except tactile encoder parameters.
+        freeze_filter=nnx.Not(nnx_utils.PathRegex(".*tactile.*")),
+        batch_size=8,
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=500,
+            peak_lr=1e-4,
+            decay_steps=20_000,
+            decay_lr=1e-6,
+        ),
+        ema_decay=None,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        pytorch_weight_path="/home/lc/openpi-main/pi0.5_pytorch",
+        num_train_steps=20_000,
         save_interval=500,
         keep_period=500,
     ),
