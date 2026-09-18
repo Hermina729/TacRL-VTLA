@@ -6,7 +6,7 @@ import numpy as np
 from openpi import transforms
 from openpi.models import model as _model
 
-#测试案例，使用随机数生成一个输入例子
+# Test helper: create a random input example.
 def make_libero_example() -> dict:
     """Creates a random input example for the Libero policy."""
     return {
@@ -16,14 +16,14 @@ def make_libero_example() -> dict:
         "prompt": "do something",
     }
 
-#解析图片，将图片转换为合格的numpy数组
+# Parse an image into a valid NumPy array.
 def _parse_image(image) -> np.ndarray:
-    #将图片转换为numpy数组
+    # Convert the image to a NumPy array.
     image = np.asarray(image)
-    #如果图片是浮点数，则转换为uint8
+    # Convert floating-point images to uint8.
     if np.issubdtype(image.dtype, np.floating):
         image = (255 * image).astype(np.uint8)
-    # 若首个维度是通道（如形状为 3xHxW），则重排维度为“长x宽x通道”以符合标准显示格式
+    # If the first dimension is channels (for example, 3xHxW), reorder to HxWxC.
     if image.shape[0] == 3:
         image = einops.rearrange(image, "c h w -> h w c")
     return image
@@ -52,13 +52,6 @@ class LiberoInputs(transforms.DataTransformFn):
         # and two wrist views (left and right). If your dataset does not have a particular type
         # of image, e.g. wrist images, you can comment it out here and replace it with zeros like we do for the
         # right wrist image below.
-        # 可能需要将图像转换为 uint8 (H,W,C) 格式，因为 LeRobot 默认以 float32 (C,H,W) 存储，
-        # 但在进行策略推理 (policy inference) 时会跳过此转换步骤。
-        # 在处理自定义数据集时请保留此段逻辑；但如果你的数据集图像键名 (key) 
-        # 不是 "observation/image" 或 "observation/wrist_image"，请在下方相应位置修改。
-        # 目前 Pi0 模型支持三种图像输入：一个第三人称视角，以及两个腕部视角（左手和右手）。
-        # 如果你的数据集缺少某种特定的图像（例如没有腕部镜头），可以将其注释掉，
-        # 并参考下方对右腕图像的处理方式，用全零矩阵代替。
         base_image = _parse_image(data["observation/image"])
         wrist_image = _parse_image(data["observation/wrist_image"])
 

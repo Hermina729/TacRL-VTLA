@@ -64,7 +64,9 @@ FSR_T = int(os.environ.get("FSR_T", "5"))
 FSR_BASELINE_COUNT = int(os.environ.get("FSR_BASELINE_COUNT", "120"))
 FSR_KEEP_LAST_N = int(os.environ.get("FSR_KEEP_LAST_N", "200"))
 FSR_SCALE_DIV = float(os.environ.get("FSR_SCALE_DIV", "50.0"))
-# 有 FSR 时，启动阶段等待触觉就绪（baseline 算好 + 窗口够）再开始推理，超时(秒)，0=不等待
+# When FSR is enabled, wait for tactile readiness before inference.
+# Readiness means the baseline is computed and a full window is available.
+# Timeout is in seconds; 0 disables waiting.
 FSR_WAIT_TIMEOUT = float(os.environ.get("FSR_WAIT_TIMEOUT", "60.0"))
 
 
@@ -302,7 +304,7 @@ def main():
         except Exception as e:
             log.warning(f"FSR init failed: {e}")
 
-    # 有 FSR 且 FSR_WAIT_TIMEOUT>0 时，等 baseline 算好、能拿到有效触觉窗口后再开始推理
+    # If FSR is enabled and FSR_WAIT_TIMEOUT > 0, wait until the baseline and a valid tactile window are ready.
     if fsr is not None and FSR_WAIT_TIMEOUT > 0:
         deadline = time.time() + FSR_WAIT_TIMEOUT
         log.info("Waiting for FSR baseline + valid tactile window (%.0fs timeout)...", FSR_WAIT_TIMEOUT)
@@ -318,7 +320,7 @@ def main():
     grip = GripperState()
     dt = 1.0 / CTRL_HZ
 
-    # 触觉缓存：与 run_loop 一致，窗口未就绪时用上一帧或零，保证每次请求都带 tactile
+    # Tactile cache: match run_loop behavior by using the last frame or zeros until the window is ready.
     last_tactile_left: Optional[np.ndarray] = None
     last_tactile_right: Optional[np.ndarray] = None
     zero_tac = np.zeros((FSR_T, FSR_H, FSR_W), dtype=np.float32)
@@ -347,8 +349,8 @@ def main():
                 "prompt": PROMPT,
             }
 
-            # 触觉：use_tactile=True 时服务器要求每次观测都带 tactile_left / tactile_right
-            # 优先真实窗口 → 否则用上一帧缓存 → 否则零数组（与 run_loop 逻辑一致）
+            # Tactile: when use_tactile=True, the server expects tactile_left / tactile_right every request.
+            # Prefer a real window, then the cached previous frame, then zeros.
             if fsr is not None:
                 tac_l, tac_r = fsr.get_window(FSR_T)
             else:

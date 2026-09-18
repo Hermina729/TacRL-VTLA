@@ -11,22 +11,22 @@
 
 set -euo pipefail
 
-# 创建日志目录
+# Create the log directory.
 mkdir -p exp/slurm_logs
 
 echo "========== Job started at $(date) =========="
 
 
-# 进入项目目录
+# Enter the project directory.
 cd /home/wh624/openpi-VTLA
 
-# 设置环境变量
+# Set environment variables.
 export LD_LIBRARY_PATH=/home/wh624/.lico_env/jupyterlab/env/lib:$LD_LIBRARY_PATH
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
 
 echo "Running training..."
 
-# 运行训练
+# Run training.
 uv run scripts/train_tacrl_offline.py \
     uf850_pi05_lora_tactile_rl \
     --exp-name=test_tube_0409 \

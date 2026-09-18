@@ -28,7 +28,7 @@ import serial
 from openpi_client import msgpack_numpy as client_mnp
 from xarm.wrapper import XArmAPI
 from collections import deque
-_latency_log = deque(maxlen=30)   # 记录最近30次推理延迟
+_latency_log = deque(maxlen=30)   # Keep the most recent 30 inference latencies.
 
 # ---------------- config ----------------
 URI = os.environ.get("WS_URL", "ws://127.0.0.1:8000")
@@ -565,7 +565,7 @@ async def inference_loop_async(get_state_fn):
                 if ws is None:
                     await connect()
 
-                # ======== 计时开始 ========
+                # ======== Timing starts ========
                 t_send = time.time()
                 try:
                     await ws.send(payload)
@@ -573,13 +573,13 @@ async def inference_loop_async(get_state_fn):
                 except Exception:
                     await close_ws()
                     await connect()
-                    t_send = time.time()   # 重连后重置计时
+                    t_send = time.time()   # Reset timing after reconnecting.
                     await ws.send(payload)
                     resp = await ws.recv()
                 t_recv = time.time()
 
                 infer_latency_ms = (t_recv - t_send) * 1000
-                # ======== 计时结束 ========
+                # ======== Timing ends ========
 
                 if isinstance(resp, str):
                     print("[INFER][SERVER_TEXT]\n", resp)
@@ -604,7 +604,7 @@ async def inference_loop_async(get_state_fn):
                 with buf_lock:
                     bl = len(buf)
 
-                # ======== 打印延迟（包含分项） ========
+                # ======== Print latency, including breakdown fields ========
                 print(f"[INFER][{tag}] latency={infer_latency_ms:.0f}ms  +{added} buf={bl}")
 
             except Exception as e:

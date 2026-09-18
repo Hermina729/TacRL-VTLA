@@ -4,7 +4,7 @@ This script is used to compute the normalization statistics for a given config. 
 will compute the mean and standard deviation of the data in the dataset and save it
 to the config assets directory.
 """
-#只对action和state做了归一化，image的归一化在model.py中做了归一化
+# Only actions and state are normalized here; image normalization is handled in model.py.
 import numpy as np
 import tqdm
 import tyro
@@ -15,7 +15,7 @@ import openpi.training.config as _config
 import openpi.training.data_loader as _data_loader
 import openpi.transforms as transforms
 
-#删除数据集里面的字符串类型
+# Remove string fields from the dataset.
 class RemoveStrings(transforms.DataTransformFn):
     def __call__(self, x: dict) -> dict:
         return {k: v for k, v in x.items() if not np.issubdtype(np.asarray(v).dtype, np.str_)}

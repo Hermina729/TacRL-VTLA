@@ -5,8 +5,9 @@ Stage 1  VAE pretraining
    Input : single tactile block  X_k ∈ R^{5×16×16}
    Output: reconstruction         X̂_k ∈ R^{5×16×16}
    Loss  : λ_l1·L1 + λ_l2·L2 + β·KL
-   若 W&B 里 KL 很快贴 0、rec 仍很低，多为后验坍塌；可调大 ``vae_kl_beta``、设
-   ``vae_kl_anneal_steps``（KL 退火）或 ``vae_kl_free_bits``（见 ``WMConfig``）。
+   If KL quickly collapses to 0 in W&B while reconstruction loss is still low,
+   posterior collapse is likely. Increase ``vae_kl_beta`` or set
+   ``vae_kl_anneal_steps`` for KL annealing / ``vae_kl_free_bits``; see ``WMConfig``.
 
 Stage 2  Forward dynamics
    Input : H history latents  z_{k−H+1:k}  +  H actions  a_{k−H+1:k}
@@ -18,15 +19,16 @@ Data assumption:
    Each dataset frame already stores tactile_left / tactile_right as (5,16,16).
 
 Usage:
-   脚本文件名是 ``train_tactile_world_model.py``（world 与 model 之间有下划线）。
+   The script file name is ``train_tactile_world_model.py`` with an underscore between world and model.
 
-   openpi 的 ``TrainConfig`` 要求 ``--exp-name``；若命令行未提供，本脚本会自动补上
-   ``--exp-name tactile_world_model``（也可用环境变量 ``EXP_NAME`` 覆盖默认值）。
+   openpi ``TrainConfig`` requires ``--exp-name``. If it is not provided on the
+   command line, this script automatically adds ``--exp-name tactile_world_model``.
+   The default can also be overridden with the ``EXP_NAME`` environment variable.
 
    # Stage 1 — VAE pretraining
    STAGE=1 uv run python scripts/train_tactile_world_model.py uf850_pi05_lora_tactile_sft
 
-   # 显式指定实验名（与 assets/checkpoint 子目录一致）
+   # Explicitly set the experiment name, matching the assets/checkpoint subdirectory.
    STAGE=1 uv run python scripts/train_tactile_world_model.py uf850_pi05_lora_tactile_sft \\
        --exp-name my_twm_run
 
@@ -37,14 +39,16 @@ Usage:
    # Stage 2 — dynamics with visual (wrist image + state) conditioning
    STAGE=2 USE_VISUAL=1 VAE_CKPT=checkpoints/tactile_wm/vae/step_00010000.pkl \\
        uv run python scripts/train_tactile_world_model.py uf850_pi05_lora_tactile_sft
-   # Optional（与 DataConfig repack 一致）: WRIST_IMAGE_KEY=... STATE_KEY=observation.state
-   # state 维度默认 7，且会在 USE_VISUAL=1 时从首帧自动推断；也可 STATE_DIM=14 强制指定
+   # Optional, matching DataConfig repack: WRIST_IMAGE_KEY=... STATE_KEY=observation.state
+   # state_dim defaults to 7 and is inferred from the first frame when USE_VISUAL=1.
+   # It can also be forced with STATE_DIM=14.
 
-   # Stage 3 — 仅可视化：加载 Stage2 dynamics + 冻结 VAE，在验证集选一个 episode，
-   # 对「每个合法中心 k」画下一 block 的真值 vs 预测（需与训练时相同的 split_seed / H）。
+   # Stage 3 — visualization only: load Stage 2 dynamics + frozen VAE, choose one
+   # validation episode, and plot ground truth vs. prediction for the next block at
+   # every valid center k. Use the same split_seed / H as training.
    STAGE=3 DYN_CKPT=checkpoints/tactile_wm/dynamics/step_00010000.pkl \\
        uv run python scripts/train_tactile_world_model.py uf850_pi05_lora_tactile_sft
-   # 可选：VAE_CKPT=path/to/vae.pkl 或目录；EPISODE_ID=12 强制指定验证集里的 episode_index
+   # Optional: VAE_CKPT=path/to/vae.pkl or directory; EPISODE_ID=12 forces an episode_index from the validation set.
 """
 
 import dataclasses
@@ -108,11 +112,11 @@ class WMConfig:
     # --- VAE loss (Stage 1) ---
     vae_l1_w: float = 0.7
     vae_l2_w: float = 0.3
-    # KL 权重；过小易出现「KL→0、潜变量不用」的后验坍塌。
+    # KL weight; too small can cause posterior collapse where KL -> 0 and latents are unused.
     vae_kl_beta: float = 0.02
-    # KL 线性退火：前 N step 将 β 从 0 升到 vae_kl_beta；0 表示关闭（恒定 β）。
+    # Linear KL annealing: ramp beta from 0 to vae_kl_beta over the first N steps; 0 disables annealing.
     vae_kl_anneal_steps: int = 8000
-    # Free-bits（每维最小 KL，单位 nat）；0 表示关闭。例如 0.02～0.05 可缓解 KL 被压死。
+    # Free-bits: minimum KL per dimension in nats; 0 disables it. Values around 0.02-0.05 can keep KL from collapsing.
     vae_kl_free_bits: float = 0.02
 
     # --- history predictor (Stage 2) ---
@@ -156,10 +160,10 @@ class WMConfig:
 
     # --- visual + state conditioning (Stage 2) ---
     use_visual: bool = False
-    # 与 ``DataConfig`` 里 ``observation/wrist_image`` → ``observation.images.wrist`` 一致
+    # Matches the ``observation/wrist_image`` -> ``observation.images.wrist`` repack in ``DataConfig``.
     wrist_image_key: str = "observation.images.wrist"
     state_key: str = "observation.state"
-    # 须与 ``observation.state`` 展平后长度一致（常见 7）；也可用环境变量 STATE_DIM 或 main 里自动推断
+    # Must match the flattened ``observation.state`` length, commonly 7. Can be inferred in main or forced with STATE_DIM.
     state_dim: int = 7
     image_out_dim: int = 256
     proprio_latent_dim: int = 64
@@ -903,7 +907,7 @@ def _run_stage1(cfg: WMConfig, tc: _config.TrainConfig, base_ds, ep: np.ndarray,
             shuffle=False, num_workers=tc.num_workers, seed=tc.seed + 1,
         )
 
-    # 预取一个"中间帧"验证 batch，用于固定可视化（避免 episode 头尾全零帧）
+    # Prefetch a mid-episode validation batch for fixed visualization, avoiding all-zero boundary frames.
     fixed_vis_batch = None
     if val_idx is not None and len(val_idx) >= local_batch:
         mid_start = len(val_idx) // 3
@@ -977,7 +981,7 @@ def _run_stage1(cfg: WMConfig, tc: _config.TrainConfig, base_ds, ep: np.ndarray,
 
     @nnx.jit
     def eval_step(vae_m, batch, step_key):
-        """验证用完整 β（不参与退火），与最终目标一致。"""
+        """Use the full beta for validation, without annealing, to match the final objective."""
         tl, tr = batch["tactile_left"], batch["tactile_right"]
         k1, k2 = jax.random.split(step_key)
         rl, mul, lvl, _ = vae_m(tl, rng_key=k1)
@@ -1021,7 +1025,7 @@ def _run_stage1(cfg: WMConfig, tc: _config.TrainConfig, base_ds, ep: np.ndarray,
             log_dict: dict = {}
             vis_dir = os.path.join(vae_dir, "vis")
 
-            # fixed mid-episode samples — 跨 step 对比重建质量变化
+            # Fixed mid-episode samples for comparing reconstruction quality across steps.
             if fixed_vis_batch is not None:
                 rng_loop, vk_l, vk_r = jax.random.split(rng_loop, 3)
                 log_dict["val/recon_left"] = _visualize_vae_reconstruction(
@@ -1031,7 +1035,7 @@ def _run_stage1(cfg: WMConfig, tc: _config.TrainConfig, base_ds, ep: np.ndarray,
                     vae, fixed_vis_batch, step, vk_r, save_dir=vis_dir, n_samples=4, hand="right",
                 )
 
-            # random samples — 覆盖更多样本，抽一个随机 batch
+            # Random samples for broader coverage; draw one random batch.
             if vis_batch is not None:
                 try:
                     rng_loop, rk = jax.random.split(rng_loop)
@@ -1055,7 +1059,7 @@ def _run_stage1(cfg: WMConfig, tc: _config.TrainConfig, base_ds, ep: np.ndarray,
         if (step > start_step and step % cfg.save_interval == 0) or step == tc.num_train_steps - 1:
             _save_ckpt(vae, step, vae_dir)
 
-    # 训练结束后保存一次完整 episode 的重建结果（左右手）
+    # Save one full-episode reconstruction for both hands after training finishes.
     if val_idx is not None and len(val_idx) > 0:
         ep_vis_dir = os.path.join(vae_dir, f"episode_vis_step{tc.num_train_steps}")
         rng_loop, ek_l, ek_r = jax.random.split(rng_loop, 3)
@@ -1498,14 +1502,14 @@ def main(train_config: _config.TrainConfig):
                 inferred = int(np.asarray(s0["state"], dtype=np.float32).size)
                 if inferred != cfg.state_dim:
                     logging.info(
-                        "state_dim: 使用数据集推断值 %d（WMConfig 默认曾为 %d）；"
-                        "若不对请设环境变量 STATE_DIM",
+                        "state_dim: using dataset-inferred value %d (WMConfig default was %d); "
+                        "set STATE_DIM if this is incorrect",
                         inferred,
                         cfg.state_dim,
                     )
                 cfg.state_dim = inferred
         except Exception as ex:
-            logging.warning("无法从首帧推断 state_dim，沿用 WMConfig.state_dim=%d: %s", cfg.state_dim, ex)
+            logging.warning("Could not infer state_dim from the first frame; keeping WMConfig.state_dim=%d: %s", cfg.state_dim, ex)
 
     ep_per_frame = _get_frame_episodes(raw_dataset)
     local_batch = train_config.batch_size // jax.process_count()

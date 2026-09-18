@@ -12,12 +12,13 @@ Decoder uses ConvTranspose upsampling (4×4 → 8×8 → 16×16) instead of MLP.
 Reuses the LeRobot dataset infrastructure from the VLA codebase.
 
 Usage:
-    # tyro：配置名是**第一个位置参数**，不要用 --config-name
+    # tyro: the config name is the first positional argument; do not use --config-name.
     uv run python scripts/train_tactile_prediction.py uf850_pi05_lora_tactile_sft
     uv run python scripts/train_tactile_prediction.py uf850_pi05_lora_freeze_tactile --batch-size 32
 
-    脚本文件名是 train_tactile_prediction.py（不是 train_tactile_predictor.py）。
-    覆盖数据等字段见：python scripts/train_tactile_prediction.py <配置名> --help
+    The script file name is train_tactile_prediction.py, not train_tactile_predictor.py.
+    For overriding dataset and other fields, run:
+    python scripts/train_tactile_prediction.py <config_name> --help
 """
 
 import dataclasses
@@ -59,7 +60,7 @@ class TPConfig:
     tactile_H: int = 16
     tactile_W: int = 16
     tactile_feat_dim: int = 128
-    # ConvLSTM（触觉编码器）：空间嵌入通道与 LSTM 隐状态通道
+    # ConvLSTM tactile encoder: spatial embedding channels and LSTM hidden channels.
     tactile_embed_dim: int = 128
     tactile_lstm_hidden: int = 128
     tactile_conv_lstm_kernel: int = 3
@@ -88,14 +89,15 @@ class TPConfig:
     checkpoint_dir: str = "checkpoints/tactile_pred"
     save_interval: int = 5000
     log_interval: int = 100
-    # Train / val / test：按 **episode_index** 划分整条轨迹，避免相邻帧泄漏
-    # 三者之和应 < 1，剩余 episode 作为训练集。全为 0 时不划分（行为与旧版一致：全数据训练）
+    # Train / val / test splits are made by full episode_index to avoid neighboring-frame leakage.
+    # The three fractions should sum to < 1. Remaining episodes are used for training.
+    # If both validation and test fractions are 0, no split is used and all data is used for training.
     val_episode_frac: float = 0.1
     test_episode_frac: float = 0.0
     split_seed: int = 0
     eval_interval: int = 500
     eval_batches: int = 50
-    # 每个 episode 开头跳过的帧数（接近阶段无接触，触觉全零，对训练无意义）
+    # Number of initial frames to skip per episode; approach-phase frames often have no contact and all-zero tactile data.
     skip_first_n_frames: int = 70
 
 
@@ -170,7 +172,7 @@ class ImageResNet(nnx.Module):
 
 
 class ConvLSTMCell(nnx.Module):
-    """单步 ConvLSTM（NHWC），见 Shi et al. Convolutional LSTM Network."""
+    """Single-step ConvLSTM in NHWC layout; see Shi et al., Convolutional LSTM Network."""
 
     def __init__(
         self,
@@ -203,11 +205,11 @@ class ConvLSTMCell(nnx.Module):
 
 
 class TactileEncoder(nnx.Module):
-    """Per-frame 2D CNN 嵌入 + 时间上 ConvLSTM + 空间池化 + 线性投影。
+    """Per-frame 2D CNN embedding + temporal ConvLSTM + spatial pooling + linear projection.
 
-    (B, T, H, W) → 每帧同一套 CNN → (B, T, h', w', C_emb)
-    → jax.lax.scan 沿 T 运行 ConvLSTM → 取最后一步 h_T
-    → 空间均值池化 → LayerNorm → Linear(out_dim)
+    (B, T, H, W) -> shared per-frame CNN -> (B, T, h', w', C_emb)
+    -> run ConvLSTM over T with jax.lax.scan -> take final h_T
+    -> spatial mean pooling -> LayerNorm -> Linear(out_dim)
     """
 
     def __init__(
@@ -219,7 +221,7 @@ class TactileEncoder(nnx.Module):
         conv_lstm_kernel: int = 3,
         rngs: nnx.Rngs,
     ):
-        # 与旧版相同的三层空间下采样：16×16 → 2×2，通道 → embed_dim
+        # Same three-stage spatial downsampling as the previous version: 16x16 -> 2x2, channels -> embed_dim.
         self.c1 = nnx.Conv(1, 32, (3, 3), strides=(2, 2), padding="SAME", rngs=rngs)
         self.c2 = nnx.Conv(32, 64, (3, 3), strides=(2, 2), padding="SAME", rngs=rngs)
         self.c3 = nnx.Conv(64, embed_dim, (3, 3), strides=(2, 2), padding="SAME", rngs=rngs)
@@ -241,7 +243,7 @@ class TactileEncoder(nnx.Module):
             z = nnx.relu(conv(z))
         _, hh, ww, _ = z.shape
         z = z.reshape(B, T, hh, ww, self.embed_dim)
-        # (T, B, hh, ww, C) 供 scan
+        # (T, B, hh, ww, C) for scan.
         z = jnp.transpose(z, (1, 0, 2, 3, 4))
 
         h0 = jnp.zeros((B, hh, ww, self.lstm_hidden), dtype=z.dtype)
@@ -253,7 +255,7 @@ class TactileEncoder(nnx.Module):
             return (h_new, c_new), None
 
         (h_final, _), _ = jax.lax.scan(step, (h0, c0), z)
-        # 最后时间步的空间特征 → 向量
+        # Convert final-step spatial features to a vector.
         h_final = jnp.mean(h_final, axis=(1, 2))
         return self.proj(self.norm(h_final))
 
@@ -477,7 +479,7 @@ class TactilePredFinalTransform:
 
 
 class IndexSubsetDataset:
-    """用 transition 下标子集包装数据集（下标对应 `TactileTransitionDataset` 的索引）。"""
+    """Wrap a dataset with a subset of transition indices from `TactileTransitionDataset`."""
 
     def __init__(self, base, indices: np.ndarray):
         self._base = base
@@ -491,7 +493,7 @@ class IndexSubsetDataset:
 
 
 def _get_frame_episode_indices(raw_dataset) -> np.ndarray:
-    """与 `raw_dataset` 帧对齐的 episode_index，长度 = len(raw_dataset)。"""
+    """Return episode_index values aligned with raw_dataset frames; length equals len(raw_dataset)."""
     hf = getattr(raw_dataset, "hf_dataset", None)
     if hf is not None:
         cols = getattr(hf, "column_names", []) or []
@@ -512,7 +514,7 @@ def _get_frame_episode_indices(raw_dataset) -> np.ndarray:
 
 
 def _compute_within_episode_index(episode_per_frame: np.ndarray) -> np.ndarray:
-    """对每帧计算它在所属 episode 内的第几帧（0-based）。"""
+    """Compute the 0-based within-episode frame index for each frame."""
     within = np.zeros_like(episode_per_frame)
     prev_ep = -1
     counter = 0
@@ -533,10 +535,10 @@ def _split_transition_indices_by_episode(
     seed: int,
     skip_first_n: int = 0,
 ) -> tuple[np.ndarray, np.ndarray | None, np.ndarray | None, dict]:
-    """按起始帧的 episode 将 transition 下标划分到 train/val/test。
+    """Split transition indices into train/val/test by the episode of the start frame.
 
-    Transition ``i`` 使用帧 ``i`` 的 episode_id（与 LeRobot 帧对齐）。
-    ``skip_first_n > 0`` 时，每个 episode 开头 N 帧对应的 transition 被丢弃。
+    Transition ``i`` uses the episode_id of frame ``i``, aligned with LeRobot frames.
+    When ``skip_first_n > 0``, transitions from the first N frames of each episode are dropped.
     """
     n_frames = int(episode_per_frame.shape[0])
     if n_frames < 2:
@@ -546,7 +548,7 @@ def _split_transition_indices_by_episode(
     keep_mask = within_ep[:-1] >= skip_first_n
     if skip_first_n > 0:
         n_dropped = int((~keep_mask).sum())
-        logging.info("skip_first_n_frames=%d → 丢弃 %d 个 transition（占 %.1f%%）",
+        logging.info("skip_first_n_frames=%d -> dropped %d transitions (%.1f%%)",
                      skip_first_n, n_dropped, 100.0 * n_dropped / max(len(keep_mask), 1))
 
     unique_eps = np.unique(episode_per_frame)
@@ -555,7 +557,7 @@ def _split_transition_indices_by_episode(
         return train_idx, None, None, {int(e): "train" for e in unique_eps}
 
     assert val_frac >= 0.0 and test_frac >= 0.0
-    assert val_frac + test_frac < 1.0 - 1e-9, "val_episode_frac + test_episode_frac 必须小于 1"
+    assert val_frac + test_frac < 1.0 - 1e-9, "val_episode_frac + test_episode_frac must be less than 1"
 
     rng = np.random.default_rng(seed)
     eps_shuffled = unique_eps.copy()
@@ -566,7 +568,7 @@ def _split_transition_indices_by_episode(
     n_train = n_ep - n_val - n_test
     if n_train < 1:
         raise ValueError(
-            f"划分后训练 episode 数为 0（共 {n_ep} 条 episode）。请减小 val/test 比例。"
+            f"No training episodes remain after splitting ({n_ep} total episodes). Reduce the val/test fractions."
         )
 
     train_eps = set(eps_shuffled[:n_train].tolist())
@@ -649,7 +651,7 @@ def train_step(
 
 @nnx.jit
 def eval_step(model: TactilePredictionNet, batch: dict) -> tuple[jnp.ndarray, dict]:
-    """仅前向 + 损失，用于验证/测试（无梯度）。"""
+    """Forward pass and loss only for validation/testing, without gradients."""
 
     pred_l, pred_r = model(
         batch["front_image"],
@@ -678,7 +680,7 @@ def eval_step(model: TactilePredictionNet, batch: dict) -> tuple[jnp.ndarray, di
 
 
 def _average_eval_metrics(model: TactilePredictionNet, loader: TorchDataLoader, num_batches: int) -> dict:
-    """从 loader 取 ``num_batches`` 个 batch，对 eval_step 指标取平均。"""
+    """Take ``num_batches`` batches from loader and average eval_step metrics."""
     it = iter(loader)
     acc = {}
     for _ in range(num_batches):
@@ -772,11 +774,12 @@ def main(train_config: _config.TrainConfig):
         repo_id,
         delta_timestamps={"action": [0.0]},
     )
-    # 不要使用 hf_dataset.with_format("torch")：
-    # LeRobot 在 __getitem__ 里对 HF `select(q_idx)` 的结果做 `torch.stack`，单帧查询时
-    # 某些版本会得到单个 Tensor 而非张量列表，触发
+    # Do not use hf_dataset.with_format("torch").
+    # LeRobot calls `torch.stack` on the result of HF `select(q_idx)` in __getitem__;
+    # for single-frame queries, some versions return a single Tensor instead of a tensor list, causing:
     #   TypeError: stack(): argument 'tensors' must be tuple of Tensors, not Tensor
-    # 在 DataLoader num_workers>0 的 worker 里必现。保持默认（多为 numpy）由 collate 再 stack 即可。
+    # This reliably appears in DataLoader workers when num_workers > 0.
+    # Keep the default format, usually NumPy, and let collate stack the batch.
     _hf = getattr(raw_dataset, "hf_dataset", None)
     if _hf is not None:
         logging.info("LeRobot hf_dataset: %s (not forcing torch format for worker safety)", type(_hf).__name__)
@@ -832,7 +835,7 @@ def main(train_config: _config.TrainConfig):
                 )
             else:
                 logging.warning(
-                    "验证集 transition 数 (%d) < batch_size (%d)，跳过验证 DataLoader。",
+                    "Validation transition count (%d) < batch_size (%d); skipping validation DataLoader.",
                     len(val_trans_idx),
                     train_config.batch_size,
                 )
@@ -848,15 +851,15 @@ def main(train_config: _config.TrainConfig):
                 )
             else:
                 logging.warning(
-                    "测试集 transition 数 (%d) < batch_size (%d)，跳过测试 DataLoader。",
+                    "Test transition count (%d) < batch_size (%d); skipping test DataLoader.",
                     len(test_trans_idx),
                     train_config.batch_size,
                 )
 
     if len(train_ds) < local_batch:
         raise ValueError(
-            f"训练集 transition 数 ({len(train_ds)}) 小于 batch_size ({local_batch})。"
-            "请减小 batch_size 或关闭/调低验证与测试划分。"
+            f"Training transition count ({len(train_ds)}) is smaller than batch_size ({local_batch})."
+            "Reduce batch_size or disable/reduce validation and test splits."
         )
 
     loader = TorchDataLoader(

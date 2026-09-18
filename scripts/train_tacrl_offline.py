@@ -65,9 +65,9 @@ class RLBatch:
 class RLTrainState:
     step: at.Int[at.ArrayLike, ""]
     params: nnx.State
-    model_def: nnx.GraphDef  # 这里放你的 ActorCritic graphdef（不是 BaseModel 了）
+    model_def: nnx.GraphDef  # ActorCritic graphdef, not BaseModel.
     
-    # target network params（至少包含 critic 的 target）
+    # Target network params, at least containing the critic target.
     target_params: nnx.State
 
     # three optimizers: actor / reward-critic / cost-critic
@@ -847,10 +847,10 @@ class DataLoaderImplRL:
             dones = jnp.asarray(batch_curr["dones"], dtype=jnp.float32).reshape((-1,1))
             masks = jnp.asarray(batch_curr["masks"], dtype=jnp.float32).reshape((-1,1))
 
-            # 兼容 repack 后键名为 "action"（如 UF850）或 "actions"
+            # Support either "action" after repacking, as in UF850, or "actions".
             raw_actions = batch_curr.get("actions", batch_curr.get("action"))
             if raw_actions is None:
-                raise KeyError("batch 中需包含 'actions' 或 'action'")
+                raise KeyError("batch must contain 'actions' or 'action'")
             actions = ensure_horizon(to_jax(raw_actions), action_horizon=self._action_horizon)
 
             costs_raw = batch_curr.get("costs", None)
@@ -1270,10 +1270,10 @@ def train_step_critic_only(
     rng,
     state: RLTrainState,
     batch: RLBatch,
-    cql_alpha: jax.Array,  # 传入 JAX 标量 (f32[]) 以支持 JIT，与 call site jnp.array(..., dtype=jnp.float32) 一致
+    cql_alpha: jax.Array,  # Pass a JAX scalar (f32[]) for JIT compatibility with the call site.
 ) -> tuple[RLTrainState, dict]:
-    """Only update critic + soft update target; no actor update. cql_alpha 可传入以便 warmup 阶段用更小的值。"""
-    # 整条训练链路使用加过 bias 的 reward
+    """Only update critic and soft-update target; no actor update. cql_alpha may be smaller during warmup."""
+    # Use reward with bias applied throughout the training chain.
     batch = batch.replace(rewards=batch.rewards + config.reward_bias)
 
     ac_online = nnx.merge(state.model_def, state.params)
@@ -1478,18 +1478,18 @@ def _substate_l2_delta(before: nnx.State, after: nnx.State, names: tuple[str, ..
 
 
 def make_rl_filters(config):
-    """RL 中使用的参数过滤器。
+    """Parameter filters used by RL.
 
-    CRITICAL BUG FIX: nnx.PathContains 做的是路径 *元组* 的精确元素匹配
-    （"critic" in ("cost_critic", ...) → False），不是子串匹配。
-    所以 PathContains("critic") 匹配不到 "cost_critic" / "critic_encoder" /
-    "cost_critic_encoder" 这些 key。
+    CRITICAL BUG FIX: nnx.PathContains performs exact element matching on the path tuple.
+    For example, "critic" in ("cost_critic", ...) is false; it is not substring matching.
+    Therefore PathContains("critic") does not match keys such as "cost_critic",
+    "critic_encoder", or "cost_critic_encoder".
 
-    改用 nnx_utils.PathRegex 做子串匹配，它把路径 join 成 "/" 分隔字符串
-    再做正则匹配，可以正确覆盖所有 critic 相关参数。
+    Use nnx_utils.PathRegex for substring matching instead. It joins path elements with
+    "/" and then applies the regular expression, so it correctly covers all critic params.
 
-    reward_critic_filter / cost_critic_filter 已由 _split_state_by_cost()
-    基于 dict key 实现，此处仅保留以兼容 RLTrainState 字段。
+    reward_critic_filter / cost_critic_filter are implemented by _split_state_by_cost()
+    based on dict keys. They are retained here only for RLTrainState compatibility.
     """
     base_trainable = config.trainable_filter
 
@@ -1512,8 +1512,8 @@ def soft_update_target_critic(target_params: nnx.State, online_params: nnx.State
 
     new_tgt_c = jax.tree_util.tree_map(lambda t, o: (1.0 - tau) * t + tau * o, tgt_c, onl_c)
 
-    # 关键：不要用返回值接 replace_by_pure_dict（它可能返回 None）
-    new_target = copy.deepcopy(target_params)   # 或者 target_params.copy() 如果有
+    # Important: do not use replace_by_pure_dict's return value; it may return None.
+    new_target = copy.deepcopy(target_params)   # target_params.copy() would also work if available.
     new_target.replace_by_pure_dict({
         **tgt_o.to_pure_dict(),
         **new_tgt_c.to_pure_dict(),
@@ -1543,7 +1543,7 @@ def action_for_critic(actions: jnp.ndarray, mode: ActionMode) -> jnp.ndarray:
 
 
 class CriticEnsemble(nnx.Module):
-    """Q(s,a) ensemble: outputs [E,B]. 这里 state_feat 由外部 encoder 提供。"""
+    """Q(s,a) ensemble: outputs [E,B]. state_feat is provided by an external encoder."""
     def __init__(self, in_dim: int, hidden: Sequence[int], ensemble: int, *, rngs: nnx.Rngs):
         self.ensemble = ensemble
         self.mlps = []
@@ -1563,7 +1563,7 @@ class CriticEnsemble(nnx.Module):
 
 
 # ================================================================================================================
-# ConRFT-faithful ResNet-10 critic encoder（ImageNet-1K 预训练冻结 backbone + 可训练 pooling head）
+# ConRFT-faithful ResNet-10 critic encoder with a frozen ImageNet-1K pretrained backbone and trainable pooling head.
 # ================================================================================================================
 
 class GroupNormNNX(nnx.Module):
@@ -2081,8 +2081,8 @@ def load_resnet10_pretrained_weights(ac_model: "ActorCriticCalQL") -> None:
 class ActorCriticCalQL(nnx.Module):
     """
     - actor: OpenPI model (pi0.5 action head etc.)
-    - critic_encoder: 独立的 ResNet/CNN 编码器，仅用于 critic，不共享 actor 的 encoder（参考 ConRFT）。
-    - critic: CriticEnsemble (standard Cal-QL)。
+    - critic_encoder: separate ResNet/CNN encoder used only by the critic, not shared with the actor, as in ConRFT.
+    - critic: CriticEnsemble for standard Cal-QL.
     """
     def __init__(
         self,
@@ -2168,10 +2168,10 @@ class ActorCriticCalQL(nnx.Module):
 # ================================================================================================================
 def repeat_sample_actions(ac: ActorCriticCalQL, rng: jax.Array, obs: _model.Observation, n: int) -> jnp.ndarray:
     """
-    采样 n 个动作，用于 CQL current/next actions
-    return: [B, n, AH, AD]  (我们最后会在 critic 里转成 [B,3n,ADcrit])
+    Sample n actions for CQL current/next actions.
+    Returns [B, n, AH, AD], later converted to [B, 3n, ADcrit] inside the critic.
     """
-    # 用不同 rng 采样 n 次
+    # Sample n times with different rng keys.
     keys = jax.random.split(rng, n)  # [n,2]
     # vmap over n
     acts = jax.vmap(lambda k: ac.sample_actions(k, obs))(keys)  # [n,B,AH,AD]
@@ -2247,7 +2247,7 @@ def cql_q_diff_calql(
     else:
         info["calql_bound_rate"] = jnp.array(0.0, dtype=jnp.float32)
 
-    # concat q_pred as extra action (正统 ConRFT 写法)
+    # Concatenate q_pred as an extra action, following the canonical ConRFT formulation.
     # shape -> [E_eff,B,3n+1]
     q_cat = jnp.concatenate([q_samples, jnp.expand_dims(q_pred, -1)], axis=-1)
     q_cat = q_cat - jnp.log(q_cat.shape[-1]) * cql_temp
@@ -2799,9 +2799,9 @@ def main(config: _config.TrainConfig):
         resume=config.resume,
     )
     init_wandb(config, resuming=resuming, enabled=config.wandb_enabled)
-    # 确认 target_q 裁剪配置：若为 None 则会在 loss 内用默认 100.0，避免 target_qs 爆炸
-    logging.info(f"target_q_clip = {config.target_q_clip!r} (TD target 将裁到 ±target_q_clip；None 时 loss 内用 100.0)")
-    logging.info(f"reward_bias = {config.reward_bias} (每步入口 batch.rewards = rewards + reward_bias，整条训练使用加过 bias 的 reward，与 SERL 一致)")
+    # Confirm target_q clipping: if None, the loss uses default 100.0 to avoid exploding target_qs.
+    logging.info(f"target_q_clip = {config.target_q_clip!r} (TD targets are clipped to +/-target_q_clip; None uses 100.0 in the loss)")
+    logging.info(f"reward_bias = {config.reward_bias} (batch.rewards = rewards + reward_bias at entry; the entire training path uses biased rewards, matching SERL)")
     logging.info("reward_critic_encoder = ConRFT PreTrainedResNet-10 (frozen ImageNet-1K backbone + trainable SpatialLearnedEmbeddings + bottleneck)")
     if config.use_safety_critic:
         logging.info("cost_critic_encoder  = ConRFT PreTrainedResNet-10 (SEPARATE instance, frozen backbone + trainable head)")
@@ -2843,9 +2843,9 @@ def main(config: _config.TrainConfig):
             getattr(config, "tactile_cost_area_weight", 100.0),
         )
     if config.critic_warmup_steps > 0:
-        logging.info(f"critic_warmup_steps = {config.critic_warmup_steps} (前 {config.critic_warmup_steps} 步仅更新 critic，之后正常 ConRFT)")
+        logging.info(f"critic_warmup_steps = {config.critic_warmup_steps} (update only the critic for the first {config.critic_warmup_steps} steps, then run normal ConRFT)")
         if getattr(config, "critic_warmup_cql_alpha", None) is not None:
-            logging.info(f"critic_warmup_cql_alpha = {config.critic_warmup_cql_alpha} (warmup 阶段用此 CQL 权重，便于 Q 收敛到合理尺度)")
+            logging.info(f"critic_warmup_cql_alpha = {config.critic_warmup_cql_alpha} (CQL weight used during warmup to help Q converge to a reasonable scale)")
 
     data_loader = create_data_loader_offline_rl(
         config,
@@ -2918,7 +2918,8 @@ def main(config: _config.TrainConfig):
         num_steps,
     )
 
-    # 仅 critic 的 step 不返回 actor 相关 key，stack_forest 要求所有 info 键一致，此处补全缺失键
+    # Critic-only steps do not return actor-related keys, but stack_forest requires consistent info keys.
+    # Fill missing keys here.
     INFO_ACTOR_ONLY_KEYS = ("actor_loss", "bc_loss", "q_loss", "q_sampled_mean", "cost_q_term",
                             "effective_cost_weight", "dual_cost_q", "dual_violation")
 
@@ -2939,7 +2940,8 @@ def main(config: _config.TrainConfig):
     for step in pbar:
         with sharding.set_mesh(mesh):
             if step < start_step + critic_warmup_steps:
-                # 先只训 critic：不更新 actor；warmup 阶段可用更小 cql_alpha 让终端 target 把 Q 拉上去
+                # Train only the critic first: do not update the actor.
+                # During warmup, a smaller cql_alpha can let terminal targets pull Q upward.
                 cql_alpha_use = (
                     critic_warmup_cql_alpha if critic_warmup_cql_alpha is not None else config.cql_alpha
                 )
@@ -2948,7 +2950,7 @@ def main(config: _config.TrainConfig):
                     step_rng, train_state, batch, jnp.array(cql_alpha_use, dtype=jnp.float32)
                 )
             else:
-                # 正常 ConRFT：(cta_ratio - 1) critic-only updates, then 1 critic+actor
+                # Normal ConRFT: (cta_ratio - 1) critic-only updates, then 1 critic+actor update.
                 for _ in range(cta_ratio - 1):
                     train_rng, crng = jax.random.split(train_rng)
                     train_state, _ = ptrain_step_critic_only(
@@ -2959,7 +2961,8 @@ def main(config: _config.TrainConfig):
                 train_rng, step_rng = jax.random.split(train_rng)
                 train_state, info = ptrain_step(step_rng, train_state, batch)
 
-        # step = 循环步数（每轮 1 次 actor + (cta_ratio-1) 次 critic），与 save_interval/num_train_steps 一致
+        # step is the loop count: each round has 1 actor update plus (cta_ratio - 1) critic updates.
+        # This stays aligned with save_interval and num_train_steps.
         train_state = train_state.replace(step=jnp.int32(step + 1))
 
         infos.append(_normalize_info(info))
