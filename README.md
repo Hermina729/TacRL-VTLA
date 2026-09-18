@@ -1,98 +1,117 @@
-VTLA (Vision-Tactile-Language-Action) 说明与使用
-=================================================
+VTLA (Vision-Tactile-Language-Action) Guide
+===========================================
 
-本文档聚焦在 openpi 的 PI0.5 基础上加入触觉 encoder 的 VTLA 方案，包括设计原理、从 base 模型进行
-PI0.5 微调的流程，以及带 tactile 的 LeRobot 数据集格式与预处理细节。内容以当前仓库实现为准。
+This document describes the VTLA implementation built on top of openpi PI0.5 with
+an additional tactile encoder. It covers the design, fine-tuning from the PI0.5
+base model, the tactile LeRobot dataset format, and preprocessing details. The
+content follows the current implementation in this repository.
 
-1. VTLA 设计原理概述
---------------------
+1. VTLA Design Overview
+-----------------------
 
-VTLA 的核心思想是将触觉作为额外的条件 token，和视觉 + 语言一起作为 prefix 条件输入动作专家：
+VTLA treats tactile observations as additional conditioning tokens. These tactile
+tokens are concatenated with visual and language tokens as prefix conditions for
+the action expert:
 
-- 视觉 token：来自 SigLIP 的 patch token（prefix）
-- 语言 token：来自 PaliGemma tokenizer（prefix）
-- 触觉 token：左右手各 4 个 token，共 8 个 tactile tokens（prefix）
-- 动作 token：action expert 输出的连续动作（suffix）
+- Visual tokens: SigLIP patch tokens in the prefix.
+- Language tokens: PaliGemma tokenizer outputs in the prefix.
+- Tactile tokens: 4 tokens for each hand, 8 tactile tokens in total, in the prefix.
+- Action tokens: continuous actions predicted by the action expert in the suffix.
 
-训练目标仍是 PI0.5 的 flow matching MSE（动作回归），触觉 encoder 只提供条件信息并通过同一 loss
-反向传播更新。若只训练触觉 encoder，其他模块冻结，仍可通过动作误差学习有用的触觉表征。
+The training objective remains the PI0.5 flow-matching MSE for action regression.
+The tactile encoder only provides conditional information and is updated through
+the same loss. When only the tactile encoder is trainable and all other modules
+are frozen, it can still learn useful tactile representations through the action
+prediction error.
 
-关键实现点：
-- 触觉 encoder：`src/openpi/models/tactile_encoder.py`
-- Token 拼接：`src/openpi/models/pi0.py` 的 `embed_prefix`
-- 离线 TacRL / Cal-QL：`scripts/train_tacrl_offline.py`
-- 数据管线一致：训练与推理均使用同一 `data_transforms.inputs`
-- 预处理与归一化：baseline subtraction + log1p + Normalize
+Key implementation points:
+
+- Tactile encoder: `src/openpi/models/tactile_encoder.py`
+- Token concatenation: `embed_prefix` in `src/openpi/models/pi0.py`
+- Offline TacRL / Cal-QL: `scripts/train_tacrl_offline.py`
+- Consistent data pipeline: training and inference both use `data_transforms.inputs`
+- Preprocessing and normalization: baseline subtraction + log1p + Normalize
 
 
-2. 从 PI0.5 Base 进行微调（仅触觉可训练）
-------------------------------------------
+2. Fine-Tuning from PI0.5 Base Model
+------------------------------------
 
-本节只描述基于 base 模型的 PI0.5 微调流程，使用仓库已定义配置：
-`uf850_pi05_lora_tactile`（仅训练触觉 encoder，其余全部冻结）。
+This section describes the PI0.5 fine-tuning flow from the base model using the
+repository configuration `uf850_pi05_lora_tactile`. In this setup, only the
+tactile encoder is trained and all other modules are frozen.
 
-2.1 环境准备
-^^^^^^^^^^^^
+2.1 Environment Setup
+^^^^^^^^^^^^^^^^^^^^^
 
-请确保 JAX/Flax 运行环境可用（当前环境未安装 jax/jaxlib 时无法启动训练）。
+Make sure the JAX/Flax runtime is available. Training cannot start if the current
+environment does not have `jax` / `jaxlib` installed.
 
-2.2 计算 norm stats（包含 tactile）
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+2.2 Compute Norm Stats, Including Tactile
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-触觉数据需要统计到 norm stats，否则 Normalize 不会对 tactile 生效。
+Tactile data must be included in the norm statistics. Otherwise, `Normalize` will
+not be applied to tactile inputs.
 
-执行：
+Run:
+
 ```
 python scripts/compute_norm_stats.py --config-name uf850_pi05_lora_tactile
 ```
 
-该脚本会统计以下 keys：
+The script computes statistics for the following keys:
+
 `state`, `actions`, `tactile_left`, `tactile_right`
 
-2.3 启动微调
-^^^^^^^^^^^^
+2.3 Start Fine-Tuning
+^^^^^^^^^^^^^^^^^^^^^
 
 ```
 python scripts/train.py --config-name uf850_pi05_lora_tactile --exp-name tactile_ft
 ```
 
-说明：
-- 默认加载 `gs://openpi-assets/checkpoints/pi05_base/params`
-- 仅训练触觉 encoder：配置中 `freeze_filter=Not(PathRegex(".*tactile.*"))`
-- EMA 关闭（`ema_decay=None`）
+Notes:
 
-2.4 训练/推理一致性
+- The default checkpoint is `gs://openpi-assets/checkpoints/pi05_base/params`.
+- Only the tactile encoder is trained: `freeze_filter=Not(PathRegex(".*tactile.*"))`.
+- EMA is disabled with `ema_decay=None`.
+
+2.4 Training and Inference Consistency
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Training and inference use the same transform pipeline:
+
+1. `TactilePreprocess`: baseline subtraction + log1p.
+2. `UF850Inputs`: converts dataset keys into the model input structure.
+3. `Normalize`: uses the computed norm statistics.
+
+During inference, `Policy` calls `data_transforms.inputs`, which keeps the
+preprocessing path consistent with training.
+
+
+3. LeRobot Dataset Format with Tactile Inputs
+---------------------------------------------
+
+3.1 Required Fields
 ^^^^^^^^^^^^^^^^^^^
 
-训练与推理使用同一条 transforms 管线：
-1) `TactilePreprocess`（baseline subtraction + log1p）
-2) `UF850Inputs`（将 dataset keys 转为模型输入结构）
-3) `Normalize`（根据计算的 norm stats）
+Each sample, using flat keys, should contain at least:
 
-推理路径由 `Policy` 统一调用 `data_transforms.inputs`，确保和训练一致。
-
-
-3. 加入触觉后 LeRobot 数据集格式
--------------------------------
-
-3.1 必要字段
-^^^^^^^^^^^^
-
-每条样本（扁平 key）需要至少包含：
 - `observation.images.front`       (uint8, HxWx3)
 - `observation.images.wrist`       (uint8, HxWx3)
 - `observation.state`              (float32, action_dim)
 - `observation.tactile_left`       (float32, [T, 16, 16])
 - `observation.tactile_right`      (float32, [T, 16, 16])
 - `action`                         (float32, action_dim)
-- `task_index`                     (int，prompt_from_task=True 时必须)
+- `task_index`                     (int, required when `prompt_from_task=True`)
 
-备注：
-- T 默认是 5；如果改为 8，需要同步更新数据集和配置。
-- 触觉 key 使用 `observation/tactile_left/right`（repack 时会映射）。
+Notes:
 
-3.2 `meta/modality.json` 示例
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+- The default value of T is 5. If T is changed to 8, update both the dataset and
+  the configuration.
+- Tactile keys use `observation/tactile_left/right` during repacking.
+
+3.2 Example `meta/modality.json`
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 ```
 {
@@ -106,8 +125,8 @@ python scripts/train.py --config-name uf850_pi05_lora_tactile --exp-name tactile
 }
 ```
 
-3.3 `meta/info.json` 示例
-^^^^^^^^^^^^^^^^^^^^^^^^^
+3.3 Example `meta/info.json`
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 ```
 {
@@ -121,42 +140,47 @@ python scripts/train.py --config-name uf850_pi05_lora_tactile --exp-name tactile
 }
 ```
 
-3.4 预处理细节（触觉）
-^^^^^^^^^^^^^^^^^^^^^
+3.4 Tactile Preprocessing Details
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-当前实现的触觉预处理：
-1) baseline subtraction：每条样本使用第 1 帧作为基线
-2) log1p：为了避免负数 NaN，先截断到 >= 0
-3) Normalize：使用 `compute_norm_stats.py` 统计出的均值/方差
+The current tactile preprocessing implementation uses:
 
-如果你的触觉数据存在显著负值并希望保留符号，可改为 `signed_log1p`。
+1. Baseline subtraction: the first tactile frame in each sample is used as the baseline.
+2. log1p: values are clipped to `>= 0` before `log1p` to avoid NaNs from negative values.
+3. Normalize: mean and variance are computed by `compute_norm_stats.py`.
 
-
-4. 触觉模型结构与训练逻辑说明
-----------------------------
-
-- 触觉 encoder 输出左右手各 4 个 token，共 8 个 token，通过 `embed_prefix` 拼到 prefix 末尾
-- Loss 仍是 PI0.5 flow-matching MSE，不新增额外 loss
-- 当冻结其余模块时，梯度仅更新 tactile encoder 参数
+If the tactile data contains meaningful negative values and the sign should be
+preserved, this step can be changed to `signed_log1p`.
 
 
-5. 论文版离线 TacRL 训练
------------------------
+4. Tactile Model Structure and Training Logic
+---------------------------------------------
 
-离线 RL 入口使用 `scripts/train_tacrl_offline.py`。该脚本实现论文中的 reward critic
-`Q_R`、safety/cost critic `Q_C`、Cal-QL critic loss，以及 actor 侧的 Lagrangian 约束目标：
+- The tactile encoder outputs 4 tokens for each hand, 8 tokens in total, and
+  `embed_prefix` appends them to the end of the prefix.
+- The loss remains the PI0.5 flow-matching MSE. No additional loss is introduced.
+- When the rest of the model is frozen, gradients only update the tactile encoder
+  parameters.
+
+
+5. Paper-Style Offline TacRL Training
+-------------------------------------
+
+Offline RL starts from `scripts/train_tacrl_offline.py`. The script implements the
+paper-style reward critic `Q_R`, safety/cost critic `Q_C`, Cal-QL critic loss, and
+the actor-side Lagrangian constrained objective:
 
 ```
 L_actor = beta * L_BC - eta * Q_R + lambda * Q_C
 ```
 
-推荐入口：
+Recommended entry point:
 
 ```
 bash sh/rl.sh
 ```
 
-或直接运行：
+Or run the script directly:
 
 ```
 uv run scripts/train_tacrl_offline.py uf850_pi05_lora_tactile_rl \
@@ -167,21 +191,31 @@ uv run scripts/train_tacrl_offline.py uf850_pi05_lora_tactile_rl \
   --tactile_cost_source=tactile
 ```
 
-5.1 Critic 默认直接使用 tactile
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+5.1 Critics Use Tactile Inputs by Default
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-TacRL critic 默认开启 `critic_encoder_use_tactile=True`，并使用
-`critic_tactile_encoder_type="cnn"`。也就是说 reward critic 和 cost critic 都会直接从
-`observation.tactile_left/right` 读取 raw tactile，经各自的 `SingleTactileCNN` 编码后拼进
-critic state；该 CNN 默认可训练（`critic_tactile_freeze_backbone=False`），不再默认依赖
-VAE checkpoint。只有做 VAE ablation 时才需要显式设置
-`--critic_tactile_encoder_type=vae --vae_tactile_ckpt=...`。
+The TacRL critics use tactile inputs by default through
+`critic_encoder_use_tactile=True` and `critic_tactile_encoder_type="cnn"`.
+This means both the reward critic and the cost critic read raw
+`observation.tactile_left/right` values directly. Each critic encodes tactile
+inputs with its own `SingleTactileCNN`, then concatenates the result into the
+critic state. This CNN is trainable by default
+(`critic_tactile_freeze_backbone=False`) and no longer depends on a VAE checkpoint
+by default.
 
-5.2 四项 tactile safety cost
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+A VAE checkpoint is only needed for VAE ablations. In that case, set:
 
-`use_safety_critic=True` 时，默认不再依赖数据集中预先标注的 `cost` 字段，而是从
-`observation.tactile_left/right` 按论文公式实时计算连续风险：
+```
+--critic_tactile_encoder_type=vae --vae_tactile_ckpt=...
+```
+
+5.2 Four Tactile Safety Cost Terms
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+When `use_safety_critic=True`, the training script no longer depends on a
+pre-labeled `cost` field in the dataset by default. Instead, it computes a
+continuous tactile risk signal online from `observation.tactile_left/right`
+following the paper formula:
 
 ```
 C = w_force * ReLU(f - f_max)^2
@@ -190,7 +224,7 @@ C = w_force * ReLU(f - f_max)^2
   + w_area  * ReLU(A_min - A)^2
 ```
 
-默认权重与论文 appendix 对齐：
+Default weights follow the paper appendix:
 
 ```
 tactile_cost_force_weight = 1.0
@@ -199,18 +233,23 @@ tactile_cost_asym_weight  = 0.1
 tactile_cost_area_weight  = 100.0
 ```
 
-相关阈值可在 `TrainConfig` 或命令行中调整：
-`tactile_cost_force_max`、`tactile_cost_asym_delta`、`tactile_cost_area_min`、
-`tactile_cost_contact_threshold`。如果要做旧版 ablation，可设置
-`--tactile_cost_source=dataset`，此时脚本会读取 dataset 的 `cost` 字段并按
-`cost_binarize_threshold` 二值化。
+The corresponding thresholds can be adjusted in `TrainConfig` or from the
+command line:
 
-5.3 Online 阶段双数据集微调
-^^^^^^^^^^^^^^^^^^^^^^^^^^^
+`tactile_cost_force_max`, `tactile_cost_asym_delta`,
+`tactile_cost_area_min`, `tactile_cost_contact_threshold`
 
-Online 阶段入口是 `scripts/train_rft_online.py`。该脚本混合原 expert/demo 数据集和第二路
-online-collected 数据集，每个 batch 按 `dataset_a_ratio` 取样；critic 更新使用纯 TD loss，
-显式关闭 Cal-QL / CQL regularization。
+For the old-style ablation, set `--tactile_cost_source=dataset`. In that mode,
+the script reads the dataset `cost` field and binarizes it using
+`cost_binarize_threshold`.
+
+5.3 Online Fine-Tuning with Two Datasets
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The online-stage entry point is `scripts/train_rft_online.py`. It mixes the
+original expert/demo dataset with a second online-collected dataset. Each batch is
+sampled according to `dataset_a_ratio`. Critic updates use pure TD loss and
+explicitly disable Cal-QL / CQL regularization.
 
 ```
 uv run scripts/train_rft_online.py uf850_pi05_lora_tactile_rl \
@@ -220,35 +259,41 @@ uv run scripts/train_rft_online.py uf850_pi05_lora_tactile_rl \
 ```
 
 
-6. 常见调整
------------
+6. Common Adjustments
+---------------------
 
-6.1 T 从 5 改到 8
-^^^^^^^^^^^^^^^^
+6.1 Change T from 5 to 8
+^^^^^^^^^^^^^^^^^^^^^^^^
 
-需要改：
+Update:
+
 - `Pi0Config.tactile_T`
-- 数据集 `modality.json` 与实际数据 shape
-- 若有硬编码断言/脚本，需同步改动
+- Dataset `modality.json` and the actual tactile data shape
+- Any scripts or assertions that hard-code T
 
-不需要改：
-- `tactile_encoder` 逻辑（已支持任意前缀维）
-- token 拼接逻辑
+No changes are needed for:
 
-6.2 多卡训练 batch 维度
-^^^^^^^^^^^^^^^^^^^^^^^
+- `tactile_encoder`, which already supports arbitrary prefix dimensions
+- Token concatenation logic
 
-`tactile_encoder` 已支持 `(devices, B, T, H, W)` 形式，
-通过 `batch_shape = x.shape[:-3]` 保留所有 batch 前缀维度。
+6.2 Multi-GPU Batch Dimensions
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+`tactile_encoder` supports inputs with shape `(devices, B, T, H, W)`. It preserves
+all batch prefix dimensions through:
+
+```
+batch_shape = x.shape[:-3]
+```
 
 
-7. 关键文件索引
----------------
+7. Key Files
+------------
 
-- 触觉 encoder：`src/openpi/models/tactile_encoder.py`
-- Token 拼接：`src/openpi/models/pi0.py`
-- 配置与冻结：`src/openpi/training/config.py`
-- 离线 TacRL：`scripts/train_tacrl_offline.py`
-- Online 双数据集微调：`scripts/train_rft_online.py`
-- 触觉预处理：`src/openpi/transforms.py`
-- 统计脚本：`scripts/compute_norm_stats.py`
+- Tactile encoder: `src/openpi/models/tactile_encoder.py`
+- Token concatenation: `src/openpi/models/pi0.py`
+- Configuration and freezing: `src/openpi/training/config.py`
+- Offline TacRL: `scripts/train_tacrl_offline.py`
+- Online two-dataset fine-tuning: `scripts/train_rft_online.py`
+- Tactile preprocessing: `src/openpi/transforms.py`
+- Norm statistics script: `scripts/compute_norm_stats.py`
