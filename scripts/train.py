@@ -73,11 +73,28 @@ def init_wandb(config: _config.TrainConfig, *, resuming: bool, log_code: bool = 
 def _load_weights_and_validate(loader: _weight_loaders.WeightLoader, params_shape: at.Params) -> at.Params:
     """Loads and validates the weights. Returns a loaded subset of the weights."""
     loaded_params = loader.load(params_shape)
-    at.check_pytree_equality(expected=params_shape, got=loaded_params, check_shapes=True, check_dtypes=True)
+    
+    # Flatten both pytrees for comparison
+    expected_flat = traverse_util.flatten_dict(params_shape)
+    loaded_flat = traverse_util.flatten_dict(loaded_params)
+    
+    # Only validate keys that exist in both pytrees
+    # This allows new modules (like tactile_encoder) to be initialized randomly
+    common_keys = set(expected_flat.keys()) & set(loaded_flat.keys())
+    
+    if common_keys:
+        # Create subset pytrees for validation
+        expected_subset = {k: expected_flat[k] for k in common_keys}
+        loaded_subset = {k: loaded_flat[k] for k in common_keys}
+        
+        # Validate only the common keys
+        expected_subset_tree = traverse_util.unflatten_dict(expected_subset)
+        loaded_subset_tree = traverse_util.unflatten_dict(loaded_subset)
+        at.check_pytree_equality(expected=expected_subset_tree, got=loaded_subset_tree, check_shapes=True, check_dtypes=True)
 
     # Remove jax.ShapeDtypeStruct from the loaded params. This makes sure that only the loaded params are returned.
     return traverse_util.unflatten_dict(
-        {k: v for k, v in traverse_util.flatten_dict(loaded_params).items() if not isinstance(v, jax.ShapeDtypeStruct)}
+        {k: v for k, v in loaded_flat.items() if not isinstance(v, jax.ShapeDtypeStruct)}
     )
 
 

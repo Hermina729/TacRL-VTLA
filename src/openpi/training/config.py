@@ -383,7 +383,6 @@ class LeRobotUF850DataConfig(DataConfigFactory):
 
         data_transforms = _transforms.Group(
             inputs=[
-                _transforms.TactilePreprocess(),
                 uf850_policy.UF850Inputs(model_type=model_config.model_type),
             ],
             outputs=[uf850_policy.UF850Outputs()],
@@ -541,6 +540,110 @@ class TrainConfig:
     lr_schedule: _optimizer.LRScheduleConfig = dataclasses.field(default_factory=_optimizer.CosineDecaySchedule)
     optimizer: _optimizer.OptimizerConfig = dataclasses.field(default_factory=_optimizer.AdamW)
     ema_decay: float | None = 0.99
+
+     # ==========================
+    # Offline RL / Cal-QL / ConRFT hyperparameters
+    # ==========================
+    # If true, scripts can choose the offline-RL dataloader / losses.
+    offline_rl: bool = False
+
+    # Discount factor gamma (ConRFT 用 0.95).
+    discount: float = 1.00
+
+    # Target network soft update coefficient (tau).
+    soft_target_tau: float = 0.005
+
+    # Critic settings
+    critic_ensemble: int = 2
+    critic_subsample_size: int | None = None  # e.g., 2, or None for using all critics
+    critic_action_mode: Literal["first", "flatten"] = "first"
+    # Critic 专用编码器（与 actor 的 encoder 分离，参考 ConRFT）
+    critic_encoder_image_dim: int = 256   # 每路图像的 CNN 输出维度
+    critic_encoder_proprio_dim: int = 64  # state 投影维度（use_proprio 时）
+    critic_encoder_tactile_dim: int = 128  # 每只手的触觉 encoder 输出维度（use_tactile 时）
+    critic_encoder_use_tactile: bool = True  # critic 默认接入触觉输入
+    critic_tactile_encoder_type: Literal["cnn", "vae"] = "cnn"  # 默认直接训练 tactile CNN；vae 需显式 checkpoint
+    critic_tactile_freeze_backbone: bool = False  # direct CNN 默认端到端训练；image ResNet 的 freeze 不套到 tactile
+    # 与 ConRFT 一致：True 时 backbone（Conv+pool）不反传梯度，只训练 proj 与 state_proj
+    critic_encoder_freeze_backbone: bool = True
+    # 预训练触觉 VAE 编码器（train_tactile_world_model.py Stage 1 产出的 checkpoint）
+    vae_tactile_ckpt: str = ""        # .pkl 文件路径或 ckpt 目录（空字符串 = 不加载）
+    vae_tactile_latent_dim: int = 64  # 需与 VAE 训练时 WMConfig.latent_dim 一致
+    critic_encoder_num_spatial_blocks: int = 8  # ResNet SpatialLearnedEmbeddings 特征数
+
+    # Tactile-event-aware MoE critic: two expert sets (free-space & contact)
+    use_moe_critic: bool = False
+
+    # Dual-critic: safety critic Q_C (predicts cumulative cost)
+    use_safety_critic: bool = False
+    critic_cost_ensemble: int = 2
+    cost_weight: float = 0.1         # (legacy / fallback) fixed actor cost weight when Lagrangian is disabled
+    cost_cql_alpha: float = 0.01     # CQL alpha for cost critic (paper default)
+    cost_key: str = "cost"           # dataset key used only when tactile_cost_source is dataset/auto fallback
+    cost_binarize_threshold: float = 0.5  # dataset cost > threshold → 1; tactile cost stays continuous
+    cost_td_weight: float = 1.0          # multiplier on cost_critic_loss (NOTE: ineffective with Adam due to scale invariance; kept for SGD compatibility)
+    cost_critic_lr: float = 3e-3         # separate Adam lr for cost critic (higher than critic_lr to bridge large MC-return targets)
+
+    # Lagrangian dual variable for dynamic reward-cost balancing
+    use_lagrangian: bool = True       # True: actor uses learned lambda; False: uses fixed cost_weight
+    cost_limit: float = 4.0          # cost constraint threshold: E[Q_C] <= cost_limit
+    lag_lambda_init: float = 0.0     # initial Lagrange multiplier
+    lag_lambda_lr: float = 5e-3      # dual variable learning rate
+    lag_lambda_max: float = 100.0    # upper clamp to prevent runaway
+
+    # Thesis tactile safety cost:
+    # C = w_f ReLU(f-f_max)^2 + w_s ||CoP_t-CoP_{t-1}||^2
+    #   + w_a ReLU(|f_L-f_R|-delta)^2 + w_A ReLU(A_min-A)^2.
+    tactile_cost_source: Literal["tactile", "dataset", "auto"] = "tactile"
+    tactile_cost_force_max: float = 4.0
+    tactile_cost_asym_delta: float = 2.0
+    tactile_cost_area_min: float = 4.0
+    tactile_cost_contact_threshold: float = 0.5
+    tactile_cost_force_weight: float = 1.0
+    tactile_cost_slip_weight: float = 3.0
+    tactile_cost_asym_weight: float = 0.1
+    tactile_cost_area_weight: float = 100.0
+
+    # CQL / Cal-QL settings（与 ConRFT 对齐）
+    cql_n_actions: int = 10
+    cql_temp: float = 1.0
+    cql_alpha: float = 0.02  # ConRFT 默认 0.1，过大会把 Q 压得过负
+    cql_action_sample_method: Literal["uniform", "normal"] = "uniform"
+    cql_clip_diff_min: float = -10.0
+    cql_clip_diff_max: float = 10.0
+    disable_calql: bool = False  # Online fine-tuning uses pure TD critic updates, no Cal-QL/CQL term.
+
+    # Actor (ConRFT) loss weights
+    bc_weight: float = 1.0
+    q_weight: float = 0.1
+
+    # Separate learning rates for actor/critic (only used in offline RL scripts)
+    actor_lr: float = 1e-4
+    critic_lr: float = 1e-4
+    # Critic-to-actor ratio (ConRFT): (cta_ratio - 1) critic-only updates, then 1 critic+actor per outer step.
+    cta_ratio: int = 4
+
+    critic_warmup_steps: int = 0
+    critic_warmup_cql_alpha: float | None = None
+    # Offline RL (train_tacrl_offline): extra logging.info for reward/cost critic param deltas
+    log_critic_param_diagnostics: bool = True
+
+    target_q_clip: float | None = 15.0
+
+    reward_bias: float = 0.0
+
+    # Tactile-based denser rewards + MC returns (from tactile_left / tactile_right)
+    tactile_reward_enabled: bool = False
+    tactile_left_key: str = "observation.tactile_left"
+    tactile_right_key: str = "observation.tactile_right"
+    step_penalty: float = 0.0
+    terminal_reward: float = 1.0
+    use_terminal_from_dataset: bool = True
+    tactile_threshold: float = 3.0
+    tactile_consecutive_frames: int = 5
+    tactile_bonus_reward: float = 2.0
+    # After reward/cost wrappers, log every frame of the first episode (dataset order).
+    log_first_episode_reward_cost: bool = True
 
     # Specifies which weights should be frozen.
     freeze_filter: tyro.conf.Suppress[Filter] = dataclasses.field(default_factory=nnx.Nothing)
@@ -815,6 +918,71 @@ _CONFIGS = [
         num_train_steps=30_000,
     ),
 
+    # ==========================================================
+    # 阶段2: 在阶段1（tactile encoder已训练, 4999步）的checkpoint基础上
+    #         冻结 tactile encoder + LLM 主干，只训练 LoRA 参数
+    #
+    # 训练路线:
+    #   阶段1: pi05_base → 冻结主干，只训 tactile encoder → /home/yw5025/4999
+    #   阶段2: 4999 checkpoint → 冻结 tactile + 主干，只训 LoRA → 最终部署
+    #
+    # freeze_filter 逻辑:
+    #   trainable = Param AND NOT freeze_filter
+    #   freeze_filter = Any(llm非lora, tactile)
+    #   所以: 冻结 llm主干 + tactile，可训练 LoRA + action_proj 等
+    # ==========================================================
+    TrainConfig(
+        name="uf850_pi05_lora_freeze_tactile",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=15,
+            discrete_state_input=False,
+            # 开启 LoRA
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            # tactile 配置（与阶段1保持一致）
+            use_tactile=True,
+            tactile_T=5,
+            tactile_H=16,
+            tactile_W=16,
+            tactile_tokens_per_hand=4,
+            tactile_dropout=0.10,
+        ),
+        data=LeRobotUF850DataConfig(
+            repo_id="/home/yw5025/test_dataset",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=True,
+        ),
+        # 冻结: LLM 主干（非 LoRA）+ tactile encoder
+        # 可训练: 仅 LoRA 参数 + action_in_proj, action_out_proj, time_mlp 等
+        freeze_filter=nnx.Any(
+            # 条件1: LLM 主干中非 LoRA 的参数（原有 LoRA freeze 逻辑）
+            pi0_config.Pi0Config(
+                pi05=True,
+                action_horizon=15,
+                paligemma_variant="gemma_2b_lora",
+                action_expert_variant="gemma_300m_lora",
+            ).get_freeze_filter(),
+            # 条件2: tactile encoder 参数
+            nnx_utils.PathRegex(".*tactile.*"),
+        ),
+        batch_size=8,
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=500,
+            peak_lr=1e-4,
+            decay_steps=20_000,
+            decay_lr=1e-6,
+        ),
+        ema_decay=None,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        pytorch_weight_path="/home/lc/openpi-main/pi0.5_pytorch",
+        num_train_steps=20_000,
+        save_interval=500,
+        keep_period=500,
+    ),
+
+    
     TrainConfig(
         name="uf850_pi05_finetune",
         # 启用 pi0.5 架构
@@ -840,6 +1008,238 @@ _CONFIGS = [
         num_train_steps=30_000,
     ),
 
+    # ==========================================================
+    # 阶段2: 在阶段1（tactile encoder已训练）的checkpoint基础上
+    #         打开 VLM + Action Expert 的 LoRA，同时保持 tactile encoder 可训练
+    #
+    # 训练路线:
+    #   阶段1: pi05_base → 冻结主干，只训 tactile encoder → checkpoint A
+    #   阶段2: checkpoint A → LoRA + tactile encoder 一起训 → checkpoint B (最终部署用)
+    # ==========================================================
+    TrainConfig(
+        name="uf850_pi05_lora_with_tactile",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=15,
+            discrete_state_input=False,
+            # 开启 LoRA
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            # tactile 配置（与阶段1保持一致）
+            use_tactile=True,
+            tactile_T=5,
+            tactile_H=16,
+            tactile_W=16,
+            tactile_tokens_per_hand=4,
+            tactile_dropout=0.10,
+        ),
+        data=LeRobotUF850DataConfig(
+            repo_id="/home/hz425/openpi/openpi-VTLA/uf850_teleop_dataset0212",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=True,
+        ),
+
+        freeze_filter=nnx.All(
+            # 原有的 LoRA freeze filter（冻结 LLM 主干，放开 LoRA）
+            pi0_config.Pi0Config(
+                pi05=True,
+                action_horizon=15,
+                paligemma_variant="gemma_2b_lora",
+                action_expert_variant="gemma_300m_lora",
+            ).get_freeze_filter(),
+            # 额外放开 tactile encoder
+            nnx.Not(nnx_utils.PathRegex(".*tactile.*")),
+        ),
+
+        batch_size=32,
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=500,
+            peak_lr=1e-4,       
+            decay_steps=9_000,
+            decay_lr=1e-6,
+        ),
+        ema_decay=None,
+
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        pytorch_weight_path="/home/hz425/openpi-main/pi0.5_pytorch",
+        
+        num_train_steps=10_000,
+        save_interval=1000,
+        keep_period=None,
+    ),
+
+    #
+    # SFT with LoRA + tactile for UF850.
+    #
+    TrainConfig(
+        name="uf850_pi05_lora_tactile_sft",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=15,
+            discrete_state_input=False,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            use_tactile=True,
+            tactile_T=5,
+            tactile_H=16,
+            tactile_W=16,
+            tactile_tokens_per_hand=4,
+            tactile_dropout=0.10,
+        ),
+        data=LeRobotUF850DataConfig(
+            repo_id="/home/hz425/openpi/openpi-VTLA/uf850_teleop_dataset0224",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=True,
+        ),
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=15,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
+        batch_size=16,                              
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=500,
+            peak_lr=1e-4,
+            decay_steps=15_000,                     
+            decay_lr=1e-6,
+        ),
+        ema_decay=None,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        pytorch_weight_path="/home/hz425/openpi-main/pi0.5_pytorch",
+        num_train_steps=15_000,
+        save_interval=1000,
+        keep_period=5000,
+    ),
+
+
+    #
+    # Offline RL (ConRFT-CalQL) with LoRA + tactile for UF850.
+    #
+    TrainConfig(
+        name="uf850_pi05_lora_tactile_rl",
+        offline_rl=True,
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=15,
+            discrete_state_input=False,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            use_tactile=True,
+            tactile_T=5,
+            tactile_H=16,
+            tactile_W=16,
+            tactile_tokens_per_hand=4,
+            tactile_dropout=0.10,
+        ),
+        data=LeRobotUF850DataConfig(
+            repo_id="/home/hz425/openpi/openpi-VTLA/uf850_teleop_dataset0224",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=True,
+        ),
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=15,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
+        batch_size=16,
+        ema_decay=None,
+        weight_loader=weight_loaders.CheckpointWeightLoader("/home/hz425/openpi/openpi-VTLA/checkpoints/uf850_pi05_lora_tactile_sft/test_tube_sft/10000/params"),
+        
+        num_train_steps=15_000,
+        save_interval=500,
+        keep_period=1000,
+        reward_bias=0,
+        terminal_reward=1.0,
+
+        # --- offline TacRL-CalQL reward critic ---
+        discount=0.99,
+
+        # --- critic 先练好再引导 actor ---
+        critic_warmup_steps=3000,
+        critic_warmup_cql_alpha=0.0,
+
+        # --- paper actor objective: beta * L_BC - eta * Q_R + lambda * Q_C ---
+        q_weight=0.1,
+        bc_weight=1.0,
+        cql_alpha=0.01,
+
+        # --- 收紧 Q 值范围 ---
+        target_q_clip=5.0,
+
+        # --- paper dual-critic safety constraint ---
+        use_safety_critic=True,
+        use_lagrangian=True,
+        cost_limit=4.0,
+        cost_cql_alpha=0.01,
+        critic_encoder_use_tactile=True,
+        critic_tactile_encoder_type="cnn",
+        critic_tactile_freeze_backbone=False,
+        tactile_cost_source="tactile",
+        tactile_cost_force_weight=1.0,
+        tactile_cost_slip_weight=3.0,
+        tactile_cost_asym_weight=0.1,
+        tactile_cost_area_weight=100.0,
+
+        # --- tactile reward ---
+        tactile_reward_enabled=True,
+        tactile_left_key="observation.tactile_left",
+        tactile_right_key="observation.tactile_right",
+        step_penalty=0.0,
+        tactile_threshold=4.0,
+        tactile_consecutive_frames=5,
+        tactile_bonus_reward=0,
+        use_moe_critic=False,
+    ),
+
+    # ==========================================================
+    # 阶段2: 在阶段1（tactile encoder已训练, 4999步）的checkpoint基础上
+    #         全参微调（所有参数可训练，包括 tactile encoder）
+    #
+    # 训练路线:
+    #   阶段1: pi05_base → 冻结主干，只训 tactile encoder → /home/yw5025/4999
+    #   阶段2: 4999 checkpoint → 全参微调 → 最终部署用的 checkpoint
+    # ==========================================================
+    TrainConfig(
+        name="uf850_pi05_finetune_with_tactile",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=15,
+            discrete_state_input=False,
+            # tactile 配置（与阶段1保持一致）
+            use_tactile=True,
+            tactile_T=5,
+            tactile_H=16,
+            tactile_W=16,
+            tactile_tokens_per_hand=4,
+            tactile_dropout=0.10,
+        ),
+        data=LeRobotUF850DataConfig(
+            repo_id="/home/yw5025/test_dataset",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=True,
+        ),
+        # 全参微调：不设 freeze_filter，所有参数可训练
+        batch_size=8,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=500,
+            peak_lr=5e-5,
+            decay_steps=20_000,
+            decay_lr=1e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.995,
+        # 指向阶段1的 checkpoint（包含训好的 tactile encoder）
+        weight_loader=weight_loaders.CheckpointWeightLoader("/home/yw5025/4999/params"),
+        pytorch_weight_path="/home/lc/openpi-main/pi0.5_pytorch",
+        num_train_steps=30_000,
+        save_interval=500,
+        keep_period=500,
+    ),
+
     TrainConfig(
         name="uf850_pi05_finetune_lora",
         # 启用 pi0.5 架构并配置 LoRA 变体
@@ -852,7 +1252,7 @@ _CONFIGS = [
             action_expert_variant="gemma_300m_lora",  # 动作解码器部分使用 LoRA
         ),
         data=LeRobotUF850DataConfig(
-            repo_id="/home/lc/openpi-main/uf850_teleop_datasetV1",
+            repo_id="/home/yw5025/test_dataset",
             base_config=DataConfig(prompt_from_task=True),
             extra_delta_transform=True,
         ),
@@ -896,13 +1296,11 @@ _CONFIGS = [
             tactile_T=5,
             tactile_H=16,
             tactile_W=16,
-            tactile_use_delta=True,
-            tactile_hidden=1024,
-            tactile_emb_dim=512,
+            tactile_tokens_per_hand=4,
             tactile_dropout=0.10,
         ),
         data=LeRobotUF850DataConfig(
-            repo_id="/home/lc/openpi-main/uf850_teleop_datasetV1",
+            repo_id="/home/yw5025/test_dataset",
             base_config=DataConfig(prompt_from_task=True),
             extra_delta_transform=True,
         ),

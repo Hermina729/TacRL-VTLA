@@ -101,24 +101,26 @@ class Pi0(_model.BaseModel):
             self.action_time_mlp_out = nnx.Linear(action_expert_config.width, action_expert_config.width, rngs=rngs)
         self.action_out_proj = nnx.Linear(action_expert_config.width, config.action_dim, rngs=rngs)
         if self.use_tactile:
-            tactile_cfg = _tactile.DualFSRMLPConfig(
+            tactile_cfg = _tactile.DualFSR3DCNNConfig(
                 T=config.tactile_T,
                 H=config.tactile_H,
                 W=config.tactile_W,
-                use_delta=config.tactile_use_delta,
-                hidden=config.tactile_hidden,
-                emb_dim=config.tactile_emb_dim,
+                tokens_per_hand=config.tactile_tokens_per_hand,
                 width=paligemma_config.width,
                 dropout=config.tactile_dropout,
             )
-            self.tactile_encoder = _tactile.DualFSRToTwoTokens(tactile_cfg)
+            tactile_module = _tactile.DualFSRToTokens(tactile_cfg)
+            self.tactile_encoder = nnx_bridge.ToNNX(tactile_module)
+            # Initialize with dummy inputs
+            dummy_tactile = jnp.zeros((1, config.tactile_T, config.tactile_H, config.tactile_W), dtype=jnp.float32)
+            self.tactile_encoder.lazy_init(dummy_tactile, dummy_tactile, train=False, rngs=rngs)
 
         # This attribute gets automatically set by model.train() and model.eval().
         self.deterministic = True
 
     @at.typecheck
     def embed_prefix(
-        self, obs: _model.Observation
+        self, obs: _model.Observation, rng: at.KeyArrayLike | None = None
     ) -> tuple[at.Float[at.Array, "b s emb"], at.Bool[at.Array, "b s"], at.Bool[at.Array, " s"]]:
         input_mask = []
         ar_mask = []
@@ -149,14 +151,21 @@ class Pi0(_model.BaseModel):
         if self.use_tactile:
             if obs.tactile_left is None or obs.tactile_right is None:
                 raise ValueError("tactile_left and tactile_right are required when use_tactile=True.")
+            if rng is None:
+                raise ValueError("rng is required when use_tactile=True for dropout.")
             tok_left, tok_right = self.tactile_encoder(
-                obs.tactile_left, obs.tactile_right, train=not self.deterministic
+                obs.tactile_left,
+                obs.tactile_right,
+                train=not self.deterministic,
+                rngs={"dropout": (lambda: rng)},
             )
             tokens.append(tok_left)
             tokens.append(tok_right)
-            input_mask.append(jnp.ones((obs.state.shape[0], 1), dtype=jnp.bool_))
-            input_mask.append(jnp.ones((obs.state.shape[0], 1), dtype=jnp.bool_))
-            ar_mask += [False, False]
+            n_left = tok_left.shape[1]
+            n_right = tok_right.shape[1]
+            input_mask.append(jnp.ones((obs.state.shape[0], n_left), dtype=jnp.bool_))
+            input_mask.append(jnp.ones((obs.state.shape[0], n_right), dtype=jnp.bool_))
+            ar_mask += [False] * (n_left + n_right)
         tokens = jnp.concatenate(tokens, axis=1)
         input_mask = jnp.concatenate(input_mask, axis=1)
         ar_mask = jnp.array(ar_mask)
@@ -215,7 +224,11 @@ class Pi0(_model.BaseModel):
     def compute_loss(
         self, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions, *, train: bool = False
     ) -> at.Float[at.Array, "*b ah"]:
-        preprocess_rng, noise_rng, time_rng = jax.random.split(rng, 3)
+        if self.use_tactile:
+            preprocess_rng, noise_rng, time_rng, tactile_rng = jax.random.split(rng, 4)
+        else:
+            preprocess_rng, noise_rng, time_rng = jax.random.split(rng, 3)
+            tactile_rng = None
         observation = _model.preprocess_observation(preprocess_rng, observation, train=train)
 
         batch_shape = actions.shape[:-2]
@@ -226,7 +239,7 @@ class Pi0(_model.BaseModel):
         u_t = noise - actions
 
         # one big forward pass of prefix + suffix at once
-        prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
+        prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation, rng=tactile_rng)
         suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(observation, x_t, time)
         input_mask = jnp.concatenate([prefix_mask, suffix_mask], axis=1)
         ar_mask = jnp.concatenate([prefix_ar_mask, suffix_ar_mask], axis=0)
@@ -257,31 +270,21 @@ class Pi0(_model.BaseModel):
             noise = jax.random.normal(rng, (batch_size, self.action_horizon, self.action_dim))
 
         # first fill KV cache with a forward pass of the prefix
-        prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
+        # In inference mode, dropout is disabled (deterministic=True), but we still pass rng for consistency
+        tactile_rng = jax.random.split(rng, 2)[1] if self.use_tactile else None
+        prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation, rng=tactile_rng)
         prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
         positions = jnp.cumsum(prefix_mask, axis=1) - 1
         _, kv_cache = self.PaliGemma.llm([prefix_tokens, None], mask=prefix_attn_mask, positions=positions)
 
-        def step(carry):
+        def scan_step(carry, _unused):
             x_t, time = carry
             suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(
                 observation, x_t, jnp.broadcast_to(time, batch_size)
             )
-            # `suffix_attn_mask` is shape (b, suffix_len, suffix_len) indicating how the suffix tokens can attend to each
-            # other
             suffix_attn_mask = make_attn_mask(suffix_mask, suffix_ar_mask)
-            # `prefix_attn_mask` is shape (b, suffix_len, prefix_len) indicating how the suffix tokens can attend to the
-            # prefix tokens
-            prefix_attn_mask = einops.repeat(prefix_mask, "b p -> b s p", s=suffix_tokens.shape[1])
-            # `combined_mask` is shape (b, suffix_len, prefix_len + suffix_len) indicating how the suffix tokens (which
-            # generate the queries) can attend to the full prefix + suffix sequence (which generates the keys and values)
-            full_attn_mask = jnp.concatenate([prefix_attn_mask, suffix_attn_mask], axis=-1)
-            assert full_attn_mask.shape == (
-                batch_size,
-                suffix_tokens.shape[1],
-                prefix_tokens.shape[1] + suffix_tokens.shape[1],
-            )
-            # `positions` is shape (b, suffix_len) indicating the positions of the suffix tokens
+            prefix_attn_mask_rep = einops.repeat(prefix_mask, "b p -> b s p", s=suffix_tokens.shape[1])
+            full_attn_mask = jnp.concatenate([prefix_attn_mask_rep, suffix_attn_mask], axis=-1)
             positions = jnp.sum(prefix_mask, axis=-1)[:, None] + jnp.cumsum(suffix_mask, axis=-1) - 1
 
             (prefix_out, suffix_out), _ = self.PaliGemma.llm(
@@ -291,15 +294,9 @@ class Pi0(_model.BaseModel):
                 kv_cache=kv_cache,
                 adarms_cond=[None, adarms_cond],
             )
-            assert prefix_out is None
             v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
 
-            return x_t + dt * v_t, time + dt
+            return (x_t + dt * v_t, time + dt), None
 
-        def cond(carry):
-            x_t, time = carry
-            # robust to floating-point error
-            return time >= -dt / 2
-
-        x_0, _ = jax.lax.while_loop(cond, step, (noise, 1.0))
+        (x_0, _), _ = jax.lax.scan(scan_step, (noise, jnp.float32(1.0)), xs=None, length=num_steps)
         return x_0

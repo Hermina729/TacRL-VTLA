@@ -11,7 +11,7 @@ VTLA 的核心思想是将触觉作为额外的条件 token，和视觉 + 语言
 
 - 视觉 token：来自 SigLIP 的 patch token（prefix）
 - 语言 token：来自 PaliGemma tokenizer（prefix）
-- 触觉 token：左右手各一个 token（prefix）
+- 触觉 token：左右手各 4 个 token，共 8 个 tactile tokens（prefix）
 - 动作 token：action expert 输出的连续动作（suffix）
 
 训练目标仍是 PI0.5 的 flow matching MSE（动作回归），触觉 encoder 只提供条件信息并通过同一 loss
@@ -20,6 +20,7 @@ VTLA 的核心思想是将触觉作为额外的条件 token，和视觉 + 语言
 关键实现点：
 - 触觉 encoder：`src/openpi/models/tactile_encoder.py`
 - Token 拼接：`src/openpi/models/pi0.py` 的 `embed_prefix`
+- 离线 TacRL / Cal-QL：`scripts/train_tacrl_offline.py`
 - 数据管线一致：训练与推理均使用同一 `data_transforms.inputs`
 - 预处理与归一化：baseline subtraction + log1p + Normalize
 
@@ -134,15 +135,95 @@ python scripts/train.py --config-name uf850_pi05_lora_tactile --exp-name tactile
 4. 触觉模型结构与训练逻辑说明
 ----------------------------
 
-- 触觉 encoder 输出两个 token（左/右），通过 `embed_prefix` 拼到 prefix 末尾
+- 触觉 encoder 输出左右手各 4 个 token，共 8 个 token，通过 `embed_prefix` 拼到 prefix 末尾
 - Loss 仍是 PI0.5 flow-matching MSE，不新增额外 loss
 - 当冻结其余模块时，梯度仅更新 tactile encoder 参数
 
 
-5. 常见调整
+5. 论文版离线 TacRL 训练
+-----------------------
+
+离线 RL 入口使用 `scripts/train_tacrl_offline.py`。该脚本实现论文中的 reward critic
+`Q_R`、safety/cost critic `Q_C`、Cal-QL critic loss，以及 actor 侧的 Lagrangian 约束目标：
+
+```
+L_actor = beta * L_BC - eta * Q_R + lambda * Q_C
+```
+
+推荐入口：
+
+```
+bash sh/rl.sh
+```
+
+或直接运行：
+
+```
+uv run scripts/train_tacrl_offline.py uf850_pi05_lora_tactile_rl \
+  --exp-name=tacrl_offline \
+  --use_safety_critic=True \
+  --use_lagrangian=True \
+  --cost_limit=4 \
+  --tactile_cost_source=tactile
+```
+
+5.1 Critic 默认直接使用 tactile
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+TacRL critic 默认开启 `critic_encoder_use_tactile=True`，并使用
+`critic_tactile_encoder_type="cnn"`。也就是说 reward critic 和 cost critic 都会直接从
+`observation.tactile_left/right` 读取 raw tactile，经各自的 `SingleTactileCNN` 编码后拼进
+critic state；该 CNN 默认可训练（`critic_tactile_freeze_backbone=False`），不再默认依赖
+VAE checkpoint。只有做 VAE ablation 时才需要显式设置
+`--critic_tactile_encoder_type=vae --vae_tactile_ckpt=...`。
+
+5.2 四项 tactile safety cost
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+`use_safety_critic=True` 时，默认不再依赖数据集中预先标注的 `cost` 字段，而是从
+`observation.tactile_left/right` 按论文公式实时计算连续风险：
+
+```
+C = w_force * ReLU(f - f_max)^2
+  + w_slip  * ||CoP_t - CoP_{t-1}||^2
+  + w_asym  * ReLU(|f_L - f_R| - delta)^2
+  + w_area  * ReLU(A_min - A)^2
+```
+
+默认权重与论文 appendix 对齐：
+
+```
+tactile_cost_force_weight = 1.0
+tactile_cost_slip_weight  = 3.0
+tactile_cost_asym_weight  = 0.1
+tactile_cost_area_weight  = 100.0
+```
+
+相关阈值可在 `TrainConfig` 或命令行中调整：
+`tactile_cost_force_max`、`tactile_cost_asym_delta`、`tactile_cost_area_min`、
+`tactile_cost_contact_threshold`。如果要做旧版 ablation，可设置
+`--tactile_cost_source=dataset`，此时脚本会读取 dataset 的 `cost` 字段并按
+`cost_binarize_threshold` 二值化。
+
+5.3 Online 阶段双数据集微调
+^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Online 阶段入口是 `scripts/train_rft_online.py`。该脚本混合原 expert/demo 数据集和第二路
+online-collected 数据集，每个 batch 按 `dataset_a_ratio` 取样；critic 更新使用纯 TD loss，
+显式关闭 Cal-QL / CQL regularization。
+
+```
+uv run scripts/train_rft_online.py uf850_pi05_lora_tactile_rl \
+  --exp-name=tacrl_online \
+  --second-data-repo=/path/to/online_lerobot_dataset \
+  --dataset-a-ratio=0.5
+```
+
+
+6. 常见调整
 -----------
 
-5.1 T 从 5 改到 8
+6.1 T 从 5 改到 8
 ^^^^^^^^^^^^^^^^
 
 需要改：
@@ -154,18 +235,20 @@ python scripts/train.py --config-name uf850_pi05_lora_tactile --exp-name tactile
 - `tactile_encoder` 逻辑（已支持任意前缀维）
 - token 拼接逻辑
 
-5.2 多卡训练 batch 维度
+6.2 多卡训练 batch 维度
 ^^^^^^^^^^^^^^^^^^^^^^^
 
 `tactile_encoder` 已支持 `(devices, B, T, H, W)` 形式，
 通过 `batch_shape = x.shape[:-3]` 保留所有 batch 前缀维度。
 
 
-6. 关键文件索引
+7. 关键文件索引
 ---------------
 
 - 触觉 encoder：`src/openpi/models/tactile_encoder.py`
 - Token 拼接：`src/openpi/models/pi0.py`
 - 配置与冻结：`src/openpi/training/config.py`
+- 离线 TacRL：`scripts/train_tacrl_offline.py`
+- Online 双数据集微调：`scripts/train_rft_online.py`
 - 触觉预处理：`src/openpi/transforms.py`
 - 统计脚本：`scripts/compute_norm_stats.py`

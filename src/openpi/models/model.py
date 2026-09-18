@@ -113,8 +113,8 @@ class Observation(Generic[ArrayT]):
     #tactile_left = jnp.asarray(tactile_left, dtype=jnp.float32)
     #tactile_right = jnp.asarray(tactile_right, dtype=jnp.float32)
 
-    tactile_left: at.Float[ArrayT, "*b t h w"] | None = None
-    tactile_right: at.Float[ArrayT, "*b t h w"] | None = None
+    tactile_left: at.Float[ArrayT, "*b t th tw"] | None = None
+    tactile_right: at.Float[ArrayT, "*b t th tw"] | None = None
 
     @classmethod
     def from_dict(cls, data: at.PyTree[ArrayT]) -> "Observation[ArrayT]":

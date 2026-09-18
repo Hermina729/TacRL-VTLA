@@ -333,8 +333,20 @@ class TactilePreprocess(DataTransformFn):
     # Clip values below this before log1p to avoid NaNs.
     clip_min: float = 0.0
 
+    def _to_array(self, x: np.ndarray) -> np.ndarray:
+        arr = np.asarray(x)
+        if arr.dtype != object:
+            return arr.astype(np.float32)
+
+        def _stack(obj):
+            if isinstance(obj, np.ndarray) and obj.dtype == object:
+                return np.stack([_stack(v) for v in obj], axis=0)
+            return np.asarray(obj, dtype=np.float32)
+
+        return _stack(arr)
+
     def _process(self, x: np.ndarray) -> np.ndarray:
-        x = np.asarray(x, dtype=np.float32)
+        x = self._to_array(x)
         # Expect (T, H, W) for unbatched samples.
         if x.ndim < 3:
             raise ValueError(f"Expected tactile shape (T,H,W), got {x.shape}")

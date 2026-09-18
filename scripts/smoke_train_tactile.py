@@ -41,9 +41,7 @@ def main() -> None:
         tactile_T=5,
         tactile_H=16,
         tactile_W=16,
-        tactile_use_delta=True,
-        tactile_hidden=1024,
-        tactile_emb_dim=512,
+        tactile_tokens_per_hand=4,
         tactile_dropout=0.10,
         # Use dummy variants for a lightweight smoke test.
         paligemma_variant="dummy",

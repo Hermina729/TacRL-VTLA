@@ -37,9 +37,7 @@ class Pi0Config(_model.BaseModelConfig):
     tactile_T: int = 5
     tactile_H: int = 16
     tactile_W: int = 16
-    tactile_use_delta: bool = True
-    tactile_hidden: int = 1024
-    tactile_emb_dim: int = 512
+    tactile_tokens_per_hand: int = 4
     tactile_dropout: float = 0.10
 
     def __post_init__(self):

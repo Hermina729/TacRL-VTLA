@@ -148,6 +148,17 @@ def create_torch_dataset(
     if data_config.prompt_from_task:
         dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)])
 
+    # Ensure HF dataset yields torch tensors so lerobot can stack without type errors.
+    hf_dataset = getattr(dataset, "hf_dataset", None)
+    if hf_dataset is not None:
+        try:
+            dataset.hf_dataset = hf_dataset.with_format("torch")
+        except Exception:
+            try:
+                hf_dataset.set_format(type="torch")
+            except Exception:
+                pass
+
     return dataset
 
 
